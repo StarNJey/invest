@@ -5,6 +5,7 @@
  *  /api/group?id=지수ID   탭 하나의 시세(JSON)
  *  /api/quote?s=AAPL,...  관심목록용 야후 심볼 시세(JSON)
  *  /api/chart?k=y:GC=F&r=1m  기간별 차트 (r = 1d 1w 1m 3m 1y 5y)
+ *  /api/news              경제 뉴스 (언론사 RSS 모음)
  *
  * 데이터 출처 (모두 무료, 일부 지연 시세)
  *  - 야후 파이낸스: 지수·주식·원자재 선물·환율·코인(달러)
@@ -126,6 +127,19 @@ const GROUPS = [
   },
 ];
 
+// 뉴스 탭: 언론사 RSS (region: kr = 국내, world = 해외)
+const NEWS_FEEDS = [
+  { src: '연합뉴스', region: 'kr', url: 'https://www.yna.co.kr/rss/economy.xml' },
+  { src: '매일경제', region: 'kr', url: 'https://www.mk.co.kr/rss/50200011/' },  // 증권
+  { src: '매일경제', region: 'kr', url: 'https://www.mk.co.kr/rss/30100041/' },  // 경제·금융
+  { src: '한국경제', region: 'kr', url: 'https://www.hankyung.com/feed/finance' },
+  { src: '한국경제', region: 'kr', url: 'https://www.hankyung.com/feed/economy' },
+  { src: 'CNBC', region: 'world', url: 'https://www.cnbc.com/id/100003114/device/rss/rss.html' }, // Top News
+  { src: 'CNBC', region: 'world', url: 'https://www.cnbc.com/id/20910258/device/rss/rss.html' },  // Economy
+  { src: 'CNBC', region: 'world', url: 'https://www.cnbc.com/id/15839069/device/rss/rss.html' },  // Investing
+];
+const NEWS_TTL = 180; // 뉴스 목록 재사용 시간(초)
+
 // 각 탭을 몇 초 동안 재사용할지 (너무 짧게 하면 데이터 제공처에서 막힐 수 있음)
 const GROUP_TTL = 20;
 // ═══════════════════════════ 설정 끝 ═══════════════════════════
@@ -162,13 +176,15 @@ async function fetchRaw(url, { ttl = 30, type = 'json', budget, headers = {} } =
     if (budget.used >= SUBREQ_BUDGET) throw new Error('호출 한도 초과');
     budget.used++;
   }
+  const accept = type === 'json' ? 'application/json,text/plain,*/*'
+    : type === 'buf' ? 'application/rss+xml,application/atom+xml,application/xml,text/xml,*/*' : 'text/csv,text/plain,*/*';
   const res = await fetch(url, {
-    headers: { 'User-Agent': UA, Accept: type === 'json' ? 'application/json,text/plain,*/*' : 'text/csv,text/plain,*/*', ...headers },
+    headers: { 'User-Agent': UA, Accept: accept, ...headers },
     cf: { cacheTtl: ttl, cacheEverything: true },
     signal: AbortSignal.timeout(9000),
   });
   if (!res.ok) throw new Error('HTTP ' + res.status);
-  const data = type === 'json' ? await res.json() : await res.text();
+  const data = type === 'json' ? await res.json() : type === 'buf' ? await res.arrayBuffer() : await res.text();
   memSet(url, data, ttl);
   return data;
 }
@@ -437,6 +453,133 @@ async function buildChart(it, r, env) {
   return { k: it.src + ':' + it.sym, r, points: pts, base: d.base != null ? d.base * mult : null, from: d.from };
 }
 
+// ═════════ 뉴스 (RSS·Atom) ═════════
+const ENT = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', middot: '·', hellip: '…', lsquo: '‘', rsquo: '’', ldquo: '“', rdquo: '”', ndash: '–', mdash: '—' };
+function unent(s) {
+  return String(s).replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e) => {
+    if (e[0] === '#') {
+      const cp = e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+      try { return String.fromCodePoint(cp); } catch (err) { return ''; }
+    }
+    const v = ENT[e.toLowerCase()];
+    return v == null ? m : v;
+  });
+}
+function tagRaw(block, name) {
+  const re = new RegExp('<' + name + '(?:\\s[^>]*)?>([\\s\\S]*?)</' + name + '>', 'i');
+  const m = re.exec(block);
+  if (!m) return '';
+  return m[1].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').trim();
+}
+function cleanText(s) {
+  let t = unent(s);
+  if (/&(#\d+|#x[0-9a-f]+|[a-z]+);/i.test(t)) t = unent(t); // 이중 인코딩
+  return t.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+}
+function parseNewsDate(s, now) {
+  if (!s) return null;
+  s = String(s).trim();
+  let t;
+  const m = /^(\d{4})[-.\/](\d{1,2})[-.\/](\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(s);
+  if (m) {
+    t = Date.parse(m[1] + '-' + m[2].padStart(2, '0') + '-' + m[3].padStart(2, '0') + 'T' + m[4].padStart(2, '0') + ':' + m[5] + ':' + (m[6] || '00') + '+09:00');
+  } else {
+    t = Date.parse(s.replace(/\bKST\b/, '+0900'));
+  }
+  if (!Number.isFinite(t)) return null;
+  // 한국 시각을 GMT로 잘못 표기한 피드 보정
+  if (t > now + 5 * 60e3 && t - 9 * 3600e3 <= now + 5 * 60e3) t -= 9 * 3600e3;
+  return t;
+}
+function absUrl(u, base) {
+  if (!u) return null;
+  u = unent(u.trim());
+  try {
+    const x = new URL(u, base);
+    if (x.protocol === 'http:') x.protocol = 'https:';
+    return x.protocol === 'https:' ? x.href : null;
+  } catch (e) { return null; }
+}
+function newsImage(block, base) {
+  const pats = [
+    /<media:(?:content|thumbnail)\b[^>]*?\burl\s*=\s*["']([^"']+)["']/i,
+    /<enclosure\b(?=[^>]*\btype\s*=\s*["']image)[^>]*?\burl\s*=\s*["']([^"']+)["']/i,
+    /<image>\s*(?:<!\[CDATA\[)?\s*(https?:[^<\]\s]+)/i,
+  ];
+  for (const re of pats) {
+    const m = re.exec(block);
+    if (m) return absUrl(m[1], base);
+  }
+  const html = unent(tagRaw(block, 'content:encoded') || tagRaw(block, 'description') || tagRaw(block, 'content') || tagRaw(block, 'summary'));
+  const m = /<img\b[^>]*?\bsrc\s*=\s*["']([^"']+)["']/i.exec(html);
+  return m ? absUrl(m[1], base) : null;
+}
+function parseFeed(xml, f, now) {
+  let blocks = xml.match(/<item\b[\s\S]*?<\/item>/gi);
+  const atom = !blocks || !blocks.length;
+  if (atom) blocks = xml.match(/<entry\b[\s\S]*?<\/entry>/gi) || [];
+  const out = [];
+  for (const b of blocks.slice(0, 30)) {
+    const title = cleanText(tagRaw(b, 'title'));
+    let link = '';
+    if (atom) {
+      const m = /<link\b(?=[^>]*\brel\s*=\s*["']alternate["'])[^>]*?\bhref\s*=\s*["']([^"']+)["']/i.exec(b) || /<link\b[^>]*?\bhref\s*=\s*["']([^"']+)["']/i.exec(b);
+      link = m ? m[1] : '';
+    } else {
+      link = tagRaw(b, 'link');
+      if (!/^https?:/i.test(link)) {
+        const g = tagRaw(b, 'guid');
+        if (/^https?:/i.test(g)) link = g;
+      }
+    }
+    link = absUrl(link, f.url);
+    if (!title || !link) continue;
+    const time = parseNewsDate(tagRaw(b, 'pubDate') || tagRaw(b, 'dc:date') || tagRaw(b, 'published') || tagRaw(b, 'updated'), now);
+    out.push({ title, link, src: f.src, region: f.region, time, img: newsImage(b, f.url) });
+  }
+  return out;
+}
+function decodeFeed(buf) {
+  const bytes = new Uint8Array(buf);
+  let head = '';
+  for (let i = 0; i < Math.min(300, bytes.length); i++) head += String.fromCharCode(bytes[i]);
+  const m = /encoding\s*=\s*["']([\w-]+)["']/i.exec(head);
+  const enc = m ? m[1].toLowerCase() : 'utf-8';
+  if (enc !== 'utf-8' && enc !== 'utf8') {
+    try { return new TextDecoder(enc).decode(bytes); } catch (e) { /* 지원하지 않는 인코딩은 UTF-8로 */ }
+  }
+  return new TextDecoder('utf-8').decode(bytes);
+}
+async function fetchFeed(f, budget, now) {
+  const buf = await fetchRaw(f.url, { ttl: 300, type: 'buf', budget });
+  const items = parseFeed(decodeFeed(buf), f, now);
+  if (!items.length) throw new Error('기사를 찾지 못함');
+  return items;
+}
+async function buildNews() {
+  const budget = { used: 0 };
+  const now = Date.now();
+  const res = await pool(NEWS_FEEDS, 8, (f) => fetchFeed(f, budget, now));
+  const fails = {};
+  let all = [];
+  res.forEach((r, i) => {
+    const f = NEWS_FEEDS[i];
+    if (!r || r.error) (fails[f.src] = fails[f.src] || []).push(r ? r.error : '응답 없음');
+    else all = all.concat(r);
+  });
+  const errors = Object.keys(fails).map((s) => s + ' ' + fails[s].length + '건 실패 (' + fails[s][0] + ')');
+  all.sort((a, b) => (b.time || 0) - (a.time || 0));
+  const seen = new Set();
+  const items = [];
+  for (const it of all) {
+    const k = it.title.replace(/[\s"'“”‘’.,…·!?()[\]-]/g, '').toLowerCase();
+    if (seen.has(k) || seen.has(it.link)) continue;
+    seen.add(k); seen.add(it.link);
+    items.push(it);
+  }
+  return { updated: now, items: items.slice(0, 120), errors };
+}
+
 // ── 업비트
 async function upbit(list, budget) {
   const j = await fetchRaw('https://api.upbit.com/v1/ticker?markets=' + list.join(','), { ttl: 10, budget });
@@ -637,6 +780,11 @@ export default {
         }
         return json(data);
       }
+      if (p === '/api/news') {
+        let data = memGet('news');
+        if (!data) { data = await buildNews(); memSet('news', data, data.items.length ? NEWS_TTL : 30); }
+        return json(data);
+      }
       if (p === '/api/health') return json({ ok: true, ecos: !!env.ECOS_KEY, fredKey: !!env.FRED_KEY, tabs: GROUPS.map((g) => g.id) });
       if (p === '/manifest.webmanifest') {
         return new Response(JSON.stringify(MANIFEST), { headers: { 'content-type': 'application/manifest+json; charset=utf-8' } });
@@ -649,7 +797,7 @@ export default {
         return new Response(b64bytes(b), { headers: { 'content-type': 'image/png', 'cache-control': 'public, max-age=604800' } });
       }
       if (p === '/' || p === '/index.html') {
-        const tabs = GROUPS.map((g) => ({ id: g.id, title: g.title })).concat([{ id: 'watch', title: '관심' }]);
+        const tabs = GROUPS.map((g) => ({ id: g.id, title: g.title })).concat([{ id: 'watch', title: '관심' }, { id: 'news', title: '뉴스' }]);
         const html = APP_HTML.replace('"__TABS__"', JSON.stringify(tabs));
         return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache' } });
       }
@@ -763,6 +911,16 @@ section h2{position:sticky;top:var(--hdr,96px);z-index:2;margin:0;padding:14px 1
 .tbl th,.tbl td{padding:4px 0;border-bottom:1px solid var(--line);text-align:right;font-weight:400}
 .tbl th:first-child,.tbl td:first-child{text-align:left}
 .tbl td{color:var(--ink)}
+.nf{display:flex;gap:6px;padding:12px 16px 8px;border-bottom:1px solid var(--line)}
+.nfc{border:0;background:none;border-radius:999px;padding:6px 14px;font-size:14px;font-weight:600;color:var(--mute);cursor:pointer;box-shadow:inset 0 0 0 1px var(--line)}
+.nfc[aria-pressed="true"]{background:var(--ink);color:var(--bg);box-shadow:none}
+.news{display:flex;gap:12px;align-items:flex-start;padding:14px 16px;border-bottom:1px solid var(--line);color:inherit;text-decoration:none}
+.news:focus-visible,.nfc:focus-visible{outline:2px solid var(--dn);outline-offset:-2px}
+.nt{flex:1;min-width:0}
+.nh{font-size:16px;font-weight:600;line-height:1.42;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;word-break:keep-all;overflow-wrap:anywhere}
+.news:visited .nh{color:var(--mute)}
+.nm{margin-top:6px;font-size:13px;color:var(--mute)}
+.ni{flex:0 0 auto;width:88px;height:62px;border-radius:6px;object-fit:cover;background:var(--raise)}
 @media (prefers-reduced-motion: reduce){.fu,.fd,.busy .icon svg{animation:none}.plot{transition:none}}
 </style>
 </head>
@@ -901,9 +1059,38 @@ function row(it) {
   return h + '</div>';
 }
 
+const NEWS_FILTERS = [['all', '전체'], ['kr', '국내'], ['world', '해외']];
+let newsFilter = store.get('sise.newsf', 'all');
+if (!NEWS_FILTERS.some((x) => x[0] === newsFilter)) newsFilter = 'all';
+function ago(t) {
+  const s = (Date.now() - t) / 1000;
+  if (s < 60) return '방금';
+  if (s < 3600) return Math.floor(s / 60) + '분 전';
+  if (s < 86400) return Math.floor(s / 3600) + '시간 전';
+  const d = new Date(t);
+  return (d.getMonth() + 1) + '/' + d.getDate();
+}
+function renderNews(d) {
+  let h = '<div class="nf" role="group" aria-label="뉴스 범위">' + NEWS_FILTERS.map((x) =>
+    '<button type="button" class="nfc" data-nf="' + x[0] + '" aria-pressed="' + (x[0] === newsFilter) + '">' + x[1] + '</button>').join('') + '</div>';
+  if (!d) { $('#list').innerHTML = h + '<p class="empty">뉴스를 불러오는 중…</p>'; return; }
+  const list = (d.items || []).filter((n) => newsFilter === 'all' || n.region === newsFilter);
+  if (!list.length) h += '<p class="empty">' + (d.failed ? '뉴스를 불러오지 못했습니다. 연결을 확인하고 새로고침을 누르세요.' : '표시할 기사가 없습니다. 새로고침을 눌러 다시 받아 보세요.') + '</p>';
+  for (const n of list) {
+    h += '<a class="news" href="' + esc(n.link) + '" target="_blank" rel="noopener noreferrer"><div class="nt"><div class="nh">' + esc(n.title) +
+      '</div><div class="nm">' + esc(n.src) + (n.time ? ' · ' + esc(ago(n.time)) : '') + '</div></div>' +
+      (n.img ? '<img class="ni" src="' + esc(n.img) + '" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()">' : '') + '</a>';
+  }
+  h += '<div class="foot">연합뉴스·매일경제·한국경제·CNBC의 RSS에서 제목과 링크만 가져옵니다. 기사를 누르면 언론사 사이트에서 원문이 열립니다.';
+  if (d.errors && d.errors.length) h += '<div class="err">일부 언론사를 못 가져왔습니다: ' + esc(d.errors.join(' / ')) + '</div>';
+  $('#list').innerHTML = h + '</div>';
+  stamp();
+}
+
 function render() {
   const d = data[cur];
   let h = '';
+  if (cur === 'news') { renderNews(d); return; }
   if (cur === 'watch') {
     h += '<form class="add" id="addf"><input id="ws" placeholder="심볼 (예: AAPL)" autocapitalize="characters" autocomplete="off" spellcheck="false">' +
       '<input id="wn" placeholder="이름 (선택)" autocomplete="off"><button class="btn" style="margin:0">추가</button></form>' +
@@ -951,6 +1138,8 @@ async function load(id) {
   if (id === 'watch') {
     if (!watch.length) { data.watch = null; if (id === cur) render(); return; }
     url = '/api/quote?s=' + encodeURIComponent(watch.map((w) => w.s).join(','));
+  } else if (id === 'news') {
+    url = '/api/news';
   } else {
     url = '/api/group?id=' + encodeURIComponent(id);
   }
@@ -983,8 +1172,11 @@ function select(id) {
   window.scrollTo(0, 0);
   render();
   stamp();
+  if (stale(id)) load(id);
+}
+function stale(id) {
   const d = data[id];
-  if (!d || Date.now() - (d.updated || 0) > 15000) load(id);
+  return !d || Date.now() - (d.updated || 0) > (id === 'news' ? 120000 : 15000);
 }
 
 $('#tabs').innerHTML = TABS.map((t) => '<button class="tab" role="tab" data-id="' + t.id + '" aria-selected="' + (t.id === cur) + '">' + esc(t.title) + '</button>').join('');
@@ -1247,6 +1439,13 @@ window.addEventListener('resize', () => {
   rz = setTimeout(() => document.querySelectorAll('.det.open .cw[data-init]').forEach((cw) => { if (cw._g) drawChart(cw); }), 150);
 });
 $('#list').addEventListener('click', (e) => {
+  const nf = e.target.closest('[data-nf]');
+  if (nf) {
+    newsFilter = nf.dataset.nf;
+    store.set('sise.newsf', newsFilter);
+    render();
+    return;
+  }
   const b = e.target.closest('[data-act]');
   if (b) {
     if (b.dataset.act === 'add' && !watch.some((w) => w.s === b.dataset.s)) {
@@ -1284,12 +1483,9 @@ function measure() { document.documentElement.style.setProperty('--hdr', $('#top
 window.addEventListener('resize', measure);
 measure();
 
-setInterval(() => { if (document.visibilityState === 'visible') load(cur); }, 30000);
+setInterval(() => { if (document.visibilityState === 'visible' && (cur !== 'news' || stale('news'))) load(cur); }, 30000);
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') {
-    const d = data[cur];
-    if (!d || Date.now() - (d.updated || 0) > 15000) load(cur);
-  }
+  if (document.visibilityState === 'visible' && stale(cur)) load(cur);
 });
 
 select(cur);
@@ -1299,7 +1495,7 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').cat
 </html>
 `;
 const SW_JS = `// 시세판 서비스워커: 화면은 오프라인에서도 열리게, 시세는 늘 새로 받되 끊기면 마지막 값을 보여 줌
-const V = 'sise-v2';
+const V = 'sise-v3';
 const SHELL = ['/', '/manifest.webmanifest', '/icon-180.png', '/icon-192.png'];
 
 self.addEventListener('install', (e) => {
