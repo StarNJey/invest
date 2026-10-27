@@ -42,19 +42,28 @@ const GROUPS = [
   },
   {
     id: 'stocks', title: '주식', sections: [
+      // dom: 아이콘을 가져올 회사 웹사이트 주소
       { title: '한국', items: [
-        Y('005930.KS', '삼성전자', { dec: 0 }), Y('000660.KS', 'SK하이닉스', { dec: 0 }), Y('373220.KS', 'LG에너지솔루션', { dec: 0 }),
-        Y('207940.KS', '삼성바이오로직스', { dec: 0 }), Y('005380.KS', '현대차', { dec: 0 }), Y('012450.KS', '한화에어로스페이스', { dec: 0 }),
-        Y('000270.KS', '기아', { dec: 0 }), Y('105560.KS', 'KB금융', { dec: 0 }), Y('035420.KS', 'NAVER', { dec: 0 }), Y('068270.KS', '셀트리온', { dec: 0 })] },
+        Y('005930.KS', '삼성전자', { dec: 0, dom: 'samsung.com' }), Y('000660.KS', 'SK하이닉스', { dec: 0, dom: 'skhynix.com' }),
+        Y('373220.KS', 'LG에너지솔루션', { dec: 0, dom: 'lgensol.com' }), Y('207940.KS', '삼성바이오로직스', { dec: 0, dom: 'samsungbiologics.com' }),
+        Y('005380.KS', '현대차', { dec: 0, dom: 'hyundai.com' }), Y('012450.KS', '한화에어로스페이스', { dec: 0, dom: 'hanwhaaerospace.com' }),
+        Y('000270.KS', '기아', { dec: 0, dom: 'kia.com' }), Y('105560.KS', 'KB금융', { dec: 0, dom: 'kbfg.com' }),
+        Y('035420.KS', 'NAVER', { dec: 0, dom: 'naver.com' }), Y('068270.KS', '셀트리온', { dec: 0, dom: 'celltrion.com' })] },
       { title: '미국', items: [
-        Y('NVDA', '엔비디아'), Y('AAPL', '애플'), Y('MSFT', '마이크로소프트'), Y('GOOGL', '알파벳'), Y('AMZN', '아마존'),
-        Y('META', '메타'), Y('AVGO', '브로드컴'), Y('TSLA', '테슬라'), Y('BRK-B', '버크셔 해서웨이 B'), Y('JPM', 'JP모건')] },
+        Y('NVDA', '엔비디아', { dom: 'nvidia.com' }), Y('AAPL', '애플', { dom: 'apple.com' }), Y('MSFT', '마이크로소프트', { dom: 'microsoft.com' }),
+        Y('GOOGL', '알파벳', { dom: 'google.com' }), Y('AMZN', '아마존', { dom: 'amazon.com' }), Y('META', '메타', { dom: 'meta.com' }),
+        Y('AVGO', '브로드컴', { dom: 'broadcom.com' }), Y('TSLA', '테슬라', { dom: 'tesla.com' }),
+        Y('BRK-B', '버크셔 해서웨이 B', { dom: 'berkshirehathaway.com' }), Y('JPM', 'JP모건', { dom: 'jpmorganchase.com' })] },
       { title: '일본', items: [
-        Y('7203.T', '도요타', { dec: 1 }), Y('8306.T', '미쓰비시UFJ', { dec: 1 }), Y('6758.T', '소니', { dec: 1 }), Y('9984.T', '소프트뱅크그룹', { dec: 0 }),
-        Y('6501.T', '히타치', { dec: 1 }), Y('8035.T', '도쿄일렉트론', { dec: 0 }), Y('9983.T', '패스트리테일링', { dec: 0 }), Y('7974.T', '닌텐도', { dec: 0 })] },
+        Y('7203.T', '도요타', { dec: 1, dom: 'toyota.co.jp' }), Y('8306.T', '미쓰비시UFJ', { dec: 1, dom: 'mufg.jp' }),
+        Y('6758.T', '소니', { dec: 1, dom: 'sony.com' }), Y('9984.T', '소프트뱅크그룹', { dec: 0, dom: 'group.softbank' }),
+        Y('6501.T', '히타치', { dec: 1, dom: 'hitachi.com' }), Y('8035.T', '도쿄일렉트론', { dec: 0, dom: 'tel.com' }),
+        Y('9983.T', '패스트리테일링', { dec: 0, dom: 'fastretailing.com' }), Y('7974.T', '닌텐도', { dec: 0, dom: 'nintendo.com' })] },
       { title: '독일', items: [
-        Y('SAP.DE', 'SAP'), Y('SIE.DE', '지멘스'), Y('ALV.DE', '알리안츠'), Y('DTE.DE', '도이치텔레콤'),
-        Y('RHM.DE', '라인메탈'), Y('MUV2.DE', '뮌헨재보험'), Y('MBG.DE', '메르세데스-벤츠'), Y('DBK.DE', '도이치방크')] },
+        Y('SAP.DE', 'SAP', { dom: 'sap.com' }), Y('SIE.DE', '지멘스', { dom: 'siemens.com' }), Y('ALV.DE', '알리안츠', { dom: 'allianz.com' }),
+        Y('DTE.DE', '도이치텔레콤', { dom: 'telekom.com' }), Y('RHM.DE', '라인메탈', { dom: 'rheinmetall.com' }),
+        Y('MUV2.DE', '뮌헨재보험', { dom: 'munichre.com' }), Y('MBG.DE', '메르세데스-벤츠', { dom: 'mercedes-benz.com' }),
+        Y('DBK.DE', '도이치방크', { dom: 'db.com' })] },
     ],
   },
   {
@@ -203,8 +212,34 @@ function thin(arr, n) {
 const iso = (d) => d.toISOString().slice(0, 10);
 
 // ── 야후 파이낸스
+// 미국 주식·ETF 심볼(AAPL, BRK-B 등)은 프리마켓·애프터마켓까지 받아 옴
+const US_EQ = /^[A-Z]{1,5}(-[A-Z])?$/;
+
+// 막대 시각(초)이 프리·정규·애프터 중 어디에 속하는지
+function sessionOf(m) {
+  const tp = m.tradingPeriods && !Array.isArray(m.tradingPeriods) ? m.tradingPeriods : {};
+  const ctp = m.currentTradingPeriod || {};
+  const list = (k) => {
+    const a = Array.isArray(tp[k]) ? tp[k].flat(2) : [];
+    if (ctp[k]) a.push(ctp[k]);
+    return a.filter((p) => p && p.start != null && p.end != null);
+  };
+  const pre = list('pre'), reg = list('regular'), post = list('post');
+  const off = m.gmtoffset != null ? m.gmtoffset : -14400;
+  const byClock = (t) => {
+    const d = new Date((t + off) * 1000);
+    const mins = d.getUTCHours() * 60 + d.getUTCMinutes();
+    if (mins >= 570 && mins < 960) return 'regular';
+    if (mins >= 240 && mins < 570) return 'pre';
+    return 'post';
+  };
+  const inAny = (arr, t) => arr.some((p) => t >= p.start && t < p.end);
+  return (t) => (inAny(reg, t) ? 'regular' : inAny(pre, t) ? 'pre' : inAny(post, t) ? 'post' : byClock(t));
+}
+
 async function yahoo(sym, budget) {
-  const path = '/v8/finance/chart/' + encodeURIComponent(sym) + '?range=1d&interval=15m&includePrePost=false';
+  const pp = US_EQ.test(sym);
+  const path = '/v8/finance/chart/' + encodeURIComponent(sym) + '?range=1d&interval=' + (pp ? '5m' : '15m') + '&includePrePost=' + pp;
   let j;
   try {
     j = await fetchRaw('https://query1.finance.yahoo.com' + path, { ttl: 20, budget });
@@ -215,7 +250,27 @@ async function yahoo(sym, budget) {
   if (!r) throw new Error((j && j.chart && j.chart.error && j.chart.error.description) || '데이터 없음');
   const m = r.meta || {};
   const q = (r.indicators && r.indicators.quote && r.indicators.quote[0]) || {};
-  const closes = (q.close || []).filter((v) => v != null && Number.isFinite(v));
+  const ts = r.timestamp || [];
+  const cl = q.close || [];
+  const bars = [];
+  ts.forEach((t, i) => { if (cl[i] != null && Number.isFinite(cl[i])) bars.push([t, cl[i]]); });
+  let reg = bars;
+  let ext = null;
+  if (pp && bars.length) {
+    const sess = sessionOf(m);
+    reg = bars.filter((b) => sess(b[0]) === 'regular');
+    const last = bars[bars.length - 1];
+    const kind = sess(last[0]);
+    const okType = !m.instrumentType || m.instrumentType === 'EQUITY' || m.instrumentType === 'ETF';
+    if (okType && kind !== 'regular' && m.regularMarketPrice) {
+      ext = {
+        kind, value: last[1], base: m.regularMarketPrice, time: last[0] * 1000,
+        live: Date.now() - last[0] * 1000 < 20 * 60 * 1000,
+      };
+    }
+  }
+  // 미국 주식은 정규장 막대만 미니 차트에 (프리마켓만 있는 시간엔 비워 둠)
+  const closes = (pp ? reg : bars).map((b) => b[1]);
   const value = m.regularMarketPrice != null ? m.regularMarketPrice : closes[closes.length - 1];
   const prev = m.previousClose != null ? m.previousClose : m.chartPreviousClose;
   const t = m.regularMarketTime ? m.regularMarketTime * 1000 : null;
@@ -223,7 +278,7 @@ async function yahoo(sym, budget) {
     value, prev, time: t,
     live: t ? Date.now() - t < 20 * 60 * 1000 : false,
     hi: m.regularMarketDayHigh, lo: m.regularMarketDayLow,
-    hint: m.priceHint, cur: m.currency, itype: m.instrumentType, spark: thin(closes, 40), from: '야후 파이낸스',
+    hint: m.priceHint, cur: m.currency, itype: m.instrumentType, spark: thin(closes, 40), ext, from: '야후 파이낸스',
   };
 }
 
@@ -661,28 +716,37 @@ async function fetchItems(items, env, budget, errors) {
   return got;
 }
 
-function shape(it, q) {
+function shape(it, q, av) {
   const mult = it.mult || 1;
   const m = (v) => (v == null ? null : v * mult);
   const out = {
     name: it.name, sym: it.sym, src: it.src, tick: tickOf(it), kind: it.kind, unit: it.unit || null,
     dec: it.dec != null ? it.dec : null, ysym: it.src === 'y' ? it.sym : null,
     chart: it.src !== 'calc', daily: it.src === 'f' || it.src === 'e',
+    av: !!av, logo: av && it.dom ? 'https://www.google.com/s2/favicons?domain=' + encodeURIComponent(it.dom) + '&sz=64' : null,
   };
   if (!q || q.value == null) return { ...out, value: null };
   const value = m(q.value);
   const prev = m(q.prev);
   const change = prev != null ? value - prev : null;
+  let ext = null;
+  if (q.ext && q.ext.base) {
+    const ec = q.ext.value - q.ext.base;
+    ext = {
+      label: q.ext.kind === 'pre' ? '프리' : '애프터', value: m(q.ext.value), change: m(ec),
+      pct: (ec / Math.abs(q.ext.base)) * 100, time: q.ext.time, live: !!q.ext.live,
+    };
+  }
   return {
     ...out, value, prev, change,
     pct: change != null && prev ? (change / Math.abs(prev)) * 100 : null,
     time: q.time || null, asof: q.asof || null, live: !!q.live,
     hi: m(q.hi), lo: m(q.lo), hint: q.hint != null ? q.hint : null, cur: q.cur || null, itype: q.itype || null,
-    spark: (q.spark || []).map(m), from: q.from || null,
+    spark: (q.spark || []).map(m), ext, from: q.from || null,
   };
 }
 function tickOf(it) {
-  if (it.src === 'y') return it.sym.replace(/^\^/, '').replace(/=F$|=X$|-USD$/, '');
+  if (it.src === 'y') return it.sym.replace(/^\^/, '').replace(/=F$|=X$|-USD$|\.(KS|KQ|T|DE)$/, '');
   if (it.src === 'c') return it.sym.replace(/-[A-Z]{2}$/, '');
   if (it.src === 'u') return it.sym.replace(/^KRW-/, '');
   if (it.src === 'e') return 'ECOS';
@@ -705,19 +769,37 @@ async function buildGroup(g, env) {
       outSections.push({ title: s.title, items: [], note: s.needs + ' 환경변수를 넣으면 표시됩니다 (한국은행 ECOS 무료 인증키).' });
       continue;
     }
-    const items = s.items.filter((i) => !i.hidden).map((i) => shape(i, got[keyOf(i)]));
+    const items = s.items.filter((i) => !i.hidden).map((i) => shape(i, got[keyOf(i)], g.id === 'stocks'));
     if (s.optional && !items.some((i) => i.value != null)) continue;
     outSections.push({ title: s.title, items });
   }
   return { id: g.id, title: g.title, updated: Date.now(), sections: outSections, errors, calls: budget.used };
 }
 
+// 관심 탭에 자주 넣는 ETF의 운용사 사이트 (아이콘용)
+const ETF_DOM = {
+  EWY: 'ishares.com', LQD: 'ishares.com', HYG: 'ishares.com', IVV: 'ishares.com', TLT: 'ishares.com', IEF: 'ishares.com',
+  SPY: 'ssga.com', GLD: 'ssga.com', VOO: 'vanguard.com', VTI: 'vanguard.com', BND: 'vanguard.com',
+  QQQ: 'invesco.com', QQQM: 'invesco.com', ARKK: 'ark-funds.com', SCHD: 'schwab.com', SOXX: 'ishares.com',
+};
+
 async function buildQuote(syms, env) {
   const errors = [];
   const budget = { used: 0 };
-  const items = syms.map((s) => Y(s, s));
+  const items = syms.map((s) => {
+    const known = findItem('y:' + s);
+    const dom = (known && known.dom) || ETF_DOM[s];
+    return Y(s, s, dom ? { dom } : {});
+  });
   const got = await fetchItems(items, env, budget, errors);
-  return { updated: Date.now(), items: items.map((i) => shape(i, got[keyOf(i)])), errors };
+  return {
+    updated: Date.now(),
+    items: items.map((i) => {
+      const q = got[keyOf(i)];
+      return shape(i, q, !q || q.itype === 'EQUITY' || q.itype === 'ETF');
+    }),
+    errors,
+  };
 }
 
 function json(data, status = 200) {
@@ -873,6 +955,13 @@ section h2{position:sticky;top:var(--hdr,96px);z-index:2;margin:0;padding:14px 1
 .fu{animation:fu 1.4s ease-out} .fd{animation:fd 1.4s ease-out}
 @keyframes fu{0%,35%{background:var(--upbg)}100%{background:transparent}}
 @keyframes fd{0%,35%{background:var(--dnbg)}100%{background:transparent}}
+.row.avr{grid-template-columns:28px minmax(0,1fr) 50px auto;gap:10px}
+.avr .sp{width:50px;height:20px}
+.av{width:28px;height:28px;border-radius:50%;background:#fff;display:grid;place-items:center;overflow:hidden;flex:0 0 auto}
+.av img{width:18px;height:18px;display:block}
+.av.tx{background:var(--line);color:var(--ink);font-size:14px;font-weight:700}
+.ex{margin-top:2px;font-size:12px;font-weight:600;color:var(--mute);white-space:nowrap}
+.ex.up{color:var(--up)} .ex.dn{color:var(--dn)}
 .det{display:none;padding:10px 16px 14px;background:var(--raise);border-bottom:1px solid var(--line);font-size:13px;color:var(--mute)}
 .det.open{display:block}
 .det dl{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}
@@ -919,7 +1008,7 @@ section h2{position:sticky;top:var(--hdr,96px);z-index:2;margin:0;padding:14px 1
 .nt{flex:1;min-width:0}
 .nh{font-size:16px;font-weight:600;line-height:1.42;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;word-break:keep-all;overflow-wrap:anywhere}
 .news:visited .nh{color:var(--mute)}
-.nm{margin-top:6px;font-size:13px;color:var(--mute)}
+.nsrc{margin-top:6px;font-size:13px;color:var(--mute)}
 .ni{flex:0 0 auto;width:88px;height:62px;border-radius:6px;object-fit:cover;background:var(--raise)}
 @media (prefers-reduced-motion: reduce){.fu,.fd,.busy .icon svg{animation:none}.plot{transition:none}}
 </style>
@@ -1005,7 +1094,7 @@ function timeText(it, long) {
   const now = new Date();
   const hms = pad(t.getHours()) + ':' + pad(t.getMinutes()) + ':' + pad(t.getSeconds());
   if (long) return t.getFullYear() + '-' + pad(t.getMonth() + 1) + '-' + pad(t.getDate()) + ' ' + hms;
-  return t.toDateString() === now.toDateString() ? hms : (t.getMonth() + 1) + '/' + t.getDate() + ' ' + hms.slice(0, 5);
+  return t.toDateString() === now.toDateString() ? hms : (t.getMonth() + 1) + '/' + t.getDate();
 }
 function dirOf(it) { return it.change > 0 ? 'up' : it.change < 0 ? 'dn' : ''; }
 
@@ -1040,14 +1129,31 @@ function row(it) {
   if (it.value == null) metaHtml = '<i class="dot"></i>데이터를 받지 못했습니다';
   const isOpen = open.has(key);
   ITEMS[key] = it;
-  let h = '<div class="row" role="button" tabindex="0" aria-expanded="' + isOpen + '" data-k="' + esc(key) + '">' +
+  let av = '';
+  if (it.av) {
+    const ini = (it.name || it.sym || '?').trim().charAt(0).toUpperCase();
+    av = it.logo
+      ? '<span class="av" aria-hidden="true" data-i="' + esc(ini) + '"><img src="' + esc(it.logo) + '" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="var p=this.parentNode;p.classList.add(\\'tx\\');p.textContent=p.dataset.i"></span>'
+      : '<span class="av tx" aria-hidden="true">' + esc(ini) + '</span>';
+  }
+  let ex = '';
+  if (it.ext) {
+    const ed = it.ext.change > 0 ? 'up' : it.ext.change < 0 ? 'dn' : '';
+    ex = '<div class="ex ' + ed + '">' + it.ext.label + ' ' + sign(it.ext.change) + Math.abs(it.ext.pct).toFixed(2) + '%</div>';
+  }
+  let h = '<div class="row' + (it.av ? ' avr' : '') + '" role="button" tabindex="0" aria-expanded="' + isOpen + '" data-k="' + esc(key) + '">' + av +
     '<div class="l"><div class="nm">' + esc(it.name) + '</div><div class="meta">' + metaHtml + '</div></div>' +
     spark(it) +
-    '<div class="r"><div class="px ' + flash + '">' + valueText(it) + '</div><div class="ch ' + d + '">' + esc(changeText(it)) + '</div></div></div>';
+    '<div class="r"><div class="px ' + flash + '">' + valueText(it) + '</div><div class="ch ' + d + '">' + esc(changeText(it)) + '</div>' + ex + '</div></div>';
   h += '<div class="det' + (isOpen ? ' open' : '') + '">';
   if (it.chart && it.value != null) h += '<div class="cw" data-rk="' + esc(key) + '" data-ck="' + esc(it.src + ':' + it.sym) + '"></div>';
   h += '<dl>';
   const add = (k, v) => { if (v != null && v !== '') h += '<dt>' + k + '</dt><dd>' + esc(v) + '</dd>'; };
+  if (it.ext) {
+    const et = new Date(it.ext.time);
+    add(it.ext.label + '마켓', fmt(it.ext.value, decOf(it)) + '  ' + chgText(it, it.ext.change, it.ext.value - it.ext.change) +
+      '  · ' + (et.getMonth() + 1) + '/' + et.getDate() + ' ' + pad(et.getHours()) + ':' + pad(et.getMinutes()) + (it.ext.live ? ' 거래 중' : ' 마감'));
+  }
   if (it.prev != null) add(it.kind === 'price' ? '전일 종가' : '직전 값', it.kind === 'spread' ? bp(it.prev) + 'bp' : fmt(it.prev, decOf(it)) + (it.kind === 'yield' ? '%' : ''));
   if (it.hi != null && it.lo != null) add('당일 범위', fmt(it.lo, decOf(it)) + ' ~ ' + fmt(it.hi, decOf(it)));
   add('기준 시각', timeText(it, true));
@@ -1078,7 +1184,7 @@ function renderNews(d) {
   if (!list.length) h += '<p class="empty">' + (d.failed ? '뉴스를 불러오지 못했습니다. 연결을 확인하고 새로고침을 누르세요.' : '표시할 기사가 없습니다. 새로고침을 눌러 다시 받아 보세요.') + '</p>';
   for (const n of list) {
     h += '<a class="news" href="' + esc(n.link) + '" target="_blank" rel="noopener noreferrer"><div class="nt"><div class="nh">' + esc(n.title) +
-      '</div><div class="nm">' + esc(n.src) + (n.time ? ' · ' + esc(ago(n.time)) : '') + '</div></div>' +
+      '</div><div class="nsrc">' + esc(n.src) + (n.time ? ' · ' + esc(ago(n.time)) : '') + '</div></div>' +
       (n.img ? '<img class="ni" src="' + esc(n.img) + '" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()">' : '') + '</a>';
   }
   h += '<div class="foot">연합뉴스·매일경제·한국경제·CNBC의 RSS에서 제목과 링크만 가져옵니다. 기사를 누르면 언론사 사이트에서 원문이 열립니다.';
