@@ -4,6 +4,7 @@
  *  /                     앱 화면 (홈 화면에 추가하면 앱처럼 실행)
  *  /api/group?id=지수ID   탭 하나의 시세(JSON)
  *  /api/quote?s=AAPL,...  관심목록용 야후 심볼 시세(JSON)
+ *  /api/chart?k=y:GC=F&r=1m  기간별 차트 (r = 1d 1w 1m 3m 1y 5y)
  *
  * 데이터 출처 (모두 무료, 일부 지연 시세)
  *  - 야후 파이낸스: 지수·주식·원자재 선물·환율·코인(달러)
@@ -262,12 +263,15 @@ async function fred(id, env, budget) {
 }
 
 // ── 한국은행 ECOS (시장금리 일별, 표 817Y002)
-async function ecos(items, env, budget) {
-  if (!env.ECOS_KEY) throw new Error('ECOS_KEY 미설정');
+function ecosBase(env, days, rows = 2000) {
   const kst = new Date(Date.now() + 9 * 3600e3);
   const ymd = (d) => d.toISOString().slice(0, 10).replace(/-/g, '');
-  const base = 'https://ecos.bok.or.kr/api/StatisticSearch/' + encodeURIComponent(env.ECOS_KEY) +
-    '/json/kr/1/2000/817Y002/D/' + ymd(new Date(kst - 25 * 864e5)) + '/' + ymd(kst);
+  return 'https://ecos.bok.or.kr/api/StatisticSearch/' + encodeURIComponent(env.ECOS_KEY) +
+    '/json/kr/1/' + rows + '/817Y002/D/' + ymd(new Date(kst - days * 864e5)) + '/' + ymd(kst);
+}
+async function ecos(items, env, budget) {
+  if (!env.ECOS_KEY) throw new Error('ECOS_KEY 미설정');
+  const base = ecosBase(env, 25);
   let rows = [];
   try {
     const j = await fetchRaw(base, { ttl: 3600, budget });
@@ -294,6 +298,7 @@ async function ecos(items, env, budget) {
     const last = mine[mine.length - 1];
     const prev = mine[mine.length - 2];
     const t = String(last.TIME);
+    ECOS_CODES[it.sym] = last.ITEM_CODE1 || it.sym;
     out[it.sym] = {
       value: num(last.DATA_VALUE), prev: prev ? num(prev.DATA_VALUE) : null,
       asof: t.slice(0, 4) + '-' + t.slice(4, 6) + '-' + t.slice(6, 8),
@@ -301,6 +306,135 @@ async function ecos(items, env, budget) {
     };
   }
   return out;
+}
+
+const ECOS_CODES = {}; // 이름으로 찾은 ECOS 항목의 실제 코드
+
+// ═════════ 기간별 차트 ═════════
+const RANGES = {
+  '1d': { y: ['1d', '5m'], c: '1D', u: ['minutes/10', 144], days: 1, ttl: 60 },
+  '1w': { y: ['5d', '30m'], c: '5D', u: ['minutes/60', 168], days: 9, ttl: 300 },
+  '1m': { y: ['1mo', '60m'], c: '1M', u: ['minutes/240', 186], days: 32, ttl: 900 },
+  '3m': { y: ['3mo', '1d'], c: '3M', u: ['days', 92], days: 93, ttl: 3600 },
+  '1y': { y: ['1y', '1d'], c: '1Y', u: ['weeks', 53], days: 367, ttl: 3600 },
+  '5y': { y: ['5y', '1wk'], c: '5Y', u: ['months', 60], days: 1830, ttl: 3600 },
+};
+
+function findItem(k) {
+  const i = k.indexOf(':');
+  const src = k.slice(0, i);
+  const sym = k.slice(i + 1);
+  if (!src || src === 'calc') return null;
+  for (const g of GROUPS) for (const s of g.sections) for (const it of s.items) if (it.src === src && it.sym === sym) return it;
+  if (src === 'y' && /^[A-Za-z0-9.^=\-]{1,24}$/.test(sym)) return Y(sym, sym);
+  return null;
+}
+
+function thinPairs(arr, n) {
+  if (arr.length <= n) return arr;
+  const out = [];
+  for (let i = 0; i < n; i++) out.push(arr[Math.round((i * (arr.length - 1)) / (n - 1))]);
+  return out;
+}
+
+async function yahooHist(sym, r, budget) {
+  const [range, interval] = RANGES[r].y;
+  const path = '/v8/finance/chart/' + encodeURIComponent(sym) + '?range=' + range + '&interval=' + interval + '&includePrePost=false';
+  let j;
+  try { j = await fetchRaw('https://query1.finance.yahoo.com' + path, { ttl: RANGES[r].ttl, budget }); }
+  catch (e) { j = await fetchRaw('https://query2.finance.yahoo.com' + path, { ttl: RANGES[r].ttl, budget }); }
+  const res = j && j.chart && j.chart.result && j.chart.result[0];
+  if (!res) throw new Error((j && j.chart && j.chart.error && j.chart.error.description) || '데이터 없음');
+  const ts = res.timestamp || [];
+  const cl = (res.indicators && res.indicators.quote && res.indicators.quote[0] && res.indicators.quote[0].close) || [];
+  const pts = [];
+  ts.forEach((t, i) => { if (cl[i] != null && Number.isFinite(cl[i])) pts.push([t * 1000, cl[i]]); });
+  const m = res.meta || {};
+  if (r === '1d' && m.regularMarketPrice != null && m.regularMarketTime) {
+    const lt = m.regularMarketTime * 1000;
+    if (!pts.length || lt > pts[pts.length - 1][0]) pts.push([lt, m.regularMarketPrice]);
+  }
+  const base = m.chartPreviousClose != null ? m.chartPreviousClose : m.previousClose != null ? m.previousClose : null;
+  return { points: pts, base, from: '야후 파이낸스' };
+}
+
+async function cnbcHist(sym, r, budget) {
+  const url = 'https://ts-api.cnbc.com/harmony/app/charts/' + RANGES[r].c + '.json?symbol=' + encodeURIComponent(sym);
+  const j = await fetchRaw(url, { ttl: RANGES[r].ttl, budget });
+  const bars = (j && j.barData && j.barData.priceBars) || [];
+  const pts = [];
+  for (const b of bars) {
+    let t = num(b.tradeTimeinMills);
+    if (t == null && b.tradeTime) {
+      const s = String(b.tradeTime);
+      t = Date.parse(s.slice(0, 4) + '-' + s.slice(4, 6) + '-' + s.slice(6, 8) + 'T' + (s.slice(8, 10) || '00') + ':' + (s.slice(10, 12) || '00') + ':00-05:00');
+    }
+    const v = num(b.close);
+    if (t != null && Number.isFinite(t) && v != null) pts.push([t, v]);
+  }
+  if (pts.length < 2) throw new Error('CNBC 차트 없음');
+  pts.sort((a, b) => a[0] - b[0]);
+  return { points: pts, base: null, from: 'CNBC' };
+}
+
+async function fredHist(id, r, env, budget) {
+  const start = iso(new Date(Date.now() - RANGES[r].days * 864e5));
+  let rows;
+  if (env.FRED_KEY) {
+    const j = await fetchRaw('https://api.stlouisfed.org/fred/series/observations?series_id=' + id + '&api_key=' + env.FRED_KEY +
+      '&file_type=json&observation_start=' + start, { ttl: 3600, budget });
+    if (j && j.error_message) throw new Error(j.error_message);
+    rows = (j.observations || []).map((o) => [o.date, o.value]);
+  } else {
+    const txt = String(await fetchRaw('https://fred.stlouisfed.org/graph/fredgraph.csv?id=' + id + '&cosd=' + start, { ttl: 3600, type: 'text', budget }));
+    if (/^\s*</.test(txt)) throw new Error('CSV 대신 웹페이지 응답. FRED_KEY를 넣으세요');
+    rows = txt.trim().split(/\r?\n/).slice(1).map((l) => l.split(','));
+  }
+  const pts = rows.filter((x) => x[1] != null && x[1] !== '.' && x[1] !== '' && Number.isFinite(+x[1])).map((x) => [Date.parse(x[0]), +x[1]]);
+  return { points: pts, base: null, from: 'FRED' };
+}
+
+async function ecosHist(it, r, env, budget) {
+  if (!env.ECOS_KEY) throw new Error('ECOS_KEY 미설정');
+  let code = ECOS_CODES[it.sym];
+  if (!code && it.match) {
+    try { await ecos([it], env, budget); code = ECOS_CODES[it.sym]; } catch (e) { /* 코드 확인 실패 */ }
+  }
+  code = code || it.sym;
+  const j = await fetchRaw(ecosBase(env, RANGES[r].days, 3000) + '/' + code, { ttl: 3600, budget });
+  const rows = (j && j.StatisticSearch && j.StatisticSearch.row) || [];
+  if (!rows.length) throw new Error((j && j.RESULT && j.RESULT.MESSAGE) || 'ECOS 응답 없음');
+  const pts = rows.filter((x) => num(x.DATA_VALUE) != null).map((x) => {
+    const t = String(x.TIME);
+    return [Date.parse(t.slice(0, 4) + '-' + t.slice(4, 6) + '-' + t.slice(6, 8)), num(x.DATA_VALUE)];
+  }).sort((a, b) => a[0] - b[0]);
+  return { points: pts, base: null, from: '한국은행 ECOS' };
+}
+
+async function upbitHist(market, r, budget) {
+  const [path, count] = RANGES[r].u;
+  const j = await fetchRaw('https://api.upbit.com/v1/candles/' + path + '?market=' + encodeURIComponent(market) + '&count=' + count,
+    { ttl: Math.min(RANGES[r].ttl, 300), budget });
+  const pts = (Array.isArray(j) ? j : []).map((c) => [Date.parse(c.candle_date_time_utc + 'Z'), c.trade_price])
+    .filter((p) => Number.isFinite(p[0]) && p[1] != null).sort((a, b) => a[0] - b[0]);
+  return { points: pts, base: null, from: '업비트' };
+}
+
+async function buildChart(it, r, env) {
+  const budget = { used: 0 };
+  let d;
+  if (it.src === 'y') d = await yahooHist(it.sym, r, budget);
+  else if (it.src === 'u') d = await upbitHist(it.sym, r, budget);
+  else if (it.src === 'f') d = await fredHist(it.sym, r, env, budget);
+  else if (it.src === 'e') d = await ecosHist(it, r, env, budget);
+  else if (it.src === 'c') {
+    try { d = await cnbcHist(it.sym, r, budget); }
+    catch (e) { if (it.alt) d = await yahooHist(it.alt, r, budget); else throw e; }
+  } else throw new Error('차트를 지원하지 않는 항목');
+  const mult = it.mult || 1;
+  const pts = thinPairs(d.points, 320).map((p) => [p[0], p[1] * mult]);
+  if (pts.length < 2) throw new Error('이 기간 데이터가 부족합니다');
+  return { k: it.src + ':' + it.sym, r, points: pts, base: d.base != null ? d.base * mult : null, from: d.from };
 }
 
 // ── 업비트
@@ -388,8 +522,9 @@ function shape(it, q) {
   const mult = it.mult || 1;
   const m = (v) => (v == null ? null : v * mult);
   const out = {
-    name: it.name, sym: it.sym, tick: tickOf(it), kind: it.kind, unit: it.unit || null,
+    name: it.name, sym: it.sym, src: it.src, tick: tickOf(it), kind: it.kind, unit: it.unit || null,
     dec: it.dec != null ? it.dec : null, ysym: it.src === 'y' ? it.sym : null,
+    chart: it.src !== 'calc', daily: it.src === 'f' || it.src === 'e',
   };
   if (!q || q.value == null) return { ...out, value: null };
   const value = m(q.value);
@@ -486,6 +621,20 @@ export default {
         const ck = 'quote:' + uniq.join(',');
         let data = memGet(ck);
         if (!data) { data = await buildQuote(uniq, env); memSet(ck, data, GROUP_TTL); }
+        return json(data);
+      }
+      if (p === '/api/chart') {
+        const k = url.searchParams.get('k') || '';
+        const r = url.searchParams.get('r') || '1d';
+        if (!RANGES[r]) return json({ error: '알 수 없는 기간: ' + r }, 400);
+        const it = findItem(k);
+        if (!it) return json({ error: '차트를 지원하지 않는 항목' }, 404);
+        const ck = 'chart:' + k + ':' + r;
+        let data = memGet(ck);
+        if (!data) {
+          try { data = await buildChart(it, r, env); } catch (e) { return json({ error: String((e && e.message) || e) }, 502); }
+          memSet(ck, data, RANGES[r].ttl);
+        }
         return json(data);
       }
       if (p === '/api/health') return json({ ok: true, ecos: !!env.ECOS_KEY, fredKey: !!env.FRED_KEY, tabs: GROUPS.map((g) => g.id) });
@@ -588,7 +737,33 @@ section h2{position:sticky;top:var(--hdr,96px);z-index:2;margin:0;padding:14px 1
 .add input{min-width:0;flex:1;background:var(--raise);border:1px solid var(--line);border-radius:8px;padding:9px 10px;font-size:16px}
 .add input:first-child{flex:1.3}
 .hint{padding:4px 16px 8px;font-size:12px;color:var(--mute)}
-@media (prefers-reduced-motion: reduce){.fu,.fd,.busy .icon svg{animation:none}}
+.cw{margin:2px 0 12px}
+.chips{display:flex;gap:4px;margin:0 -4px 10px}
+.chip{flex:1;border:0;background:none;border-radius:8px;padding:7px 0;font-size:14px;font-weight:600;color:var(--mute);cursor:pointer}
+.chip[aria-pressed="true"]{background:var(--bg);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
+.chip:focus-visible,.plot:focus-visible,.lnk:focus-visible{outline:2px solid var(--dn);outline-offset:1px}
+.sum{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;min-height:24px;font-size:13px;color:var(--mute)}
+.sum b{font-size:17px;color:var(--ink);font-weight:700;font-variant-numeric:tabular-nums}
+.sum .up{color:var(--up);font-weight:600} .sum .dn{color:var(--dn);font-weight:600}
+.plot{position:relative;height:216px;margin-top:6px;touch-action:pan-y;user-select:none;-webkit-user-select:none;transition:opacity .2s}
+.loading .plot{opacity:.45}
+.plot svg{display:block;width:100%;height:216px;overflow:visible}
+.plot .g{stroke:var(--line);stroke-width:1}
+.plot .b{stroke:var(--faint);stroke-width:1;stroke-dasharray:3 3}
+.plot .ln{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round;stroke:var(--mute)}
+.plot .ar{stroke:none;fill:var(--mute);fill-opacity:.1}
+.plot .ln.up{stroke:var(--up)} .plot .ln.dn{stroke:var(--dn)} .plot .ar.up{fill:var(--up)} .plot .ar.dn{fill:var(--dn)}
+.plot .dot{stroke:var(--raise);stroke-width:2}
+.plot .dot.up{fill:var(--up)} .plot .dot.dn{fill:var(--dn)} .plot .dot.flat{fill:var(--mute)}
+.plot .xh{stroke:var(--mute);stroke-width:1}
+.plot text{fill:var(--mute);font-size:11px;font-family:var(--f);font-variant-numeric:tabular-nums}
+.pmsg{display:grid;place-items:center;height:100%;font-size:13px;color:var(--mute);text-align:center;padding:0 12px}
+.lnk{border:0;background:none;padding:6px 0 0;font-size:13px;color:var(--mute);text-decoration:underline;text-underline-offset:3px;cursor:pointer}
+.tbl table{width:100%;border-collapse:collapse;margin-top:6px;font-size:13px;font-variant-numeric:tabular-nums}
+.tbl th,.tbl td{padding:4px 0;border-bottom:1px solid var(--line);text-align:right;font-weight:400}
+.tbl th:first-child,.tbl td:first-child{text-align:left}
+.tbl td{color:var(--ink)}
+@media (prefers-reduced-motion: reduce){.fu,.fd,.busy .icon svg{animation:none}.plot{transition:none}}
 </style>
 </head>
 <body>
@@ -615,6 +790,7 @@ if (!TABS.some((t) => t.id === cur)) cur = TABS[0].id;
 let watch = store.get('sise.watch', []);
 const data = {};
 const last = {};
+const ITEMS = {};
 const open = new Set();
 let busy = 0;
 
@@ -638,12 +814,20 @@ function decOf(it) {
   const a = Math.abs(it.value || 0);
   return a >= 100 ? 2 : a >= 1 ? 3 : 5;
 }
-function valueText(it) {
-  if (it.value == null) return '—';
-  if (it.kind === 'yield') return fmt(it.value, decOf(it)) + '%';
-  if (it.kind === 'spread') return bp(it.value) + 'bp';
-  if (it.kind === 'premium') return sign(it.value) + fmt(Math.abs(it.value), 2) + '%';
-  return fmt(it.value, decOf(it));
+function valText(it, v) {
+  if (v == null || !isFinite(v)) return '—';
+  if (it.kind === 'yield') return fmt(v, decOf(it)) + '%';
+  if (it.kind === 'spread') return bp(v) + 'bp';
+  if (it.kind === 'premium') return sign(v) + fmt(Math.abs(v), 2) + '%';
+  return fmt(v, decOf(it));
+}
+function valueText(it) { return it.value == null ? '—' : valText(it, it.value); }
+function chgText(it, ch, base) {
+  if (ch == null || !isFinite(ch)) return '';
+  if (it.kind === 'yield' || it.kind === 'spread') return sign(ch) + bp(Math.abs(ch)) + 'bp';
+  let s = sign(ch) + fmt(Math.abs(ch), decOf(it));
+  if (base) s += ' (' + sign(ch) + Math.abs((ch / Math.abs(base)) * 100).toFixed(2) + '%)';
+  return s;
 }
 function changeText(it) {
   if (it.value == null) return '';
@@ -697,11 +881,14 @@ function row(it) {
   if (it.unit) metaHtml += ' <span class="u">' + esc(it.unit) + '</span>';
   if (it.value == null) metaHtml = '<i class="dot"></i>데이터를 받지 못했습니다';
   const isOpen = open.has(key);
+  ITEMS[key] = it;
   let h = '<div class="row" role="button" tabindex="0" aria-expanded="' + isOpen + '" data-k="' + esc(key) + '">' +
     '<div class="l"><div class="nm">' + esc(it.name) + '</div><div class="meta">' + metaHtml + '</div></div>' +
     spark(it) +
     '<div class="r"><div class="px ' + flash + '">' + valueText(it) + '</div><div class="ch ' + d + '">' + esc(changeText(it)) + '</div></div></div>';
-  h += '<div class="det' + (isOpen ? ' open' : '') + '"><dl>';
+  h += '<div class="det' + (isOpen ? ' open' : '') + '">';
+  if (it.chart && it.value != null) h += '<div class="cw" data-rk="' + esc(key) + '" data-ck="' + esc(it.src + ':' + it.sym) + '"></div>';
+  h += '<dl>';
   const add = (k, v) => { if (v != null && v !== '') h += '<dt>' + k + '</dt><dd>' + esc(v) + '</dd>'; };
   if (it.prev != null) add(it.kind === 'price' ? '전일 종가' : '직전 값', it.kind === 'spread' ? bp(it.prev) + 'bp' : fmt(it.prev, decOf(it)) + (it.kind === 'yield' ? '%' : ''));
   if (it.hi != null && it.lo != null) add('당일 범위', fmt(it.lo, decOf(it)) + ' ~ ' + fmt(it.hi, decOf(it)));
@@ -727,6 +914,8 @@ function render() {
     }
   }
   if (!d) { $('#list').innerHTML = h + '<p class="empty">불러오는 중…</p>'; return; }
+  const keep = {};
+  document.querySelectorAll('.cw[data-init]').forEach((cw) => { keep[cw.dataset.rk] = cw; });
   if (d.failed && !d.sections) { $('#list').innerHTML = h + '<p class="empty">시세를 불러오지 못했습니다. 연결을 확인하고 새로고침을 누르세요.</p>'; return; }
   for (const s of d.sections || []) {
     h += '<section><h2>' + esc(s.title) + '</h2>';
@@ -738,6 +927,10 @@ function render() {
   if (d.errors && d.errors.length) h += '<div class="err">일부 항목을 못 가져왔습니다: ' + esc(d.errors.join(' / ')) + '</div>';
   h += '</div>';
   $('#list').innerHTML = h;
+  document.querySelectorAll('.det.open .cw').forEach((ph) => {
+    const old = keep[ph.dataset.rk];
+    if (old) { ph.replaceWith(old); loadChart(old); } else initChart(ph);
+  });
   stamp();
 }
 
@@ -805,7 +998,254 @@ function toggleRow(el) {
   if (on) open.add(k); else open.delete(k);
   det.classList.toggle('open', on);
   el.setAttribute('aria-expanded', String(on));
+  const cw = det.querySelector('.cw');
+  if (on && cw) { if (cw.dataset.init) drawChart(cw); else initChart(cw); }
 }
+
+// ───────── 기간별 차트 ─────────
+const RANGE_LIST = [['1d', '1일'], ['1w', '1주'], ['1m', '1달'], ['3m', '3달'], ['1y', '1년'], ['5y', '5년']];
+const RANGE_BASE = { '1d': '전일', '1w': '1주 전', '1m': '1달 전', '3m': '3달 전', '1y': '1년 전', '5y': '5년 전' };
+const RANGE_TTL = { '1d': 60e3, '1w': 300e3, '1m': 900e3, '3m': 3600e3, '1y': 3600e3, '5y': 3600e3 };
+const charts = {};
+let prefRange = store.get('sise.range', '1d');
+if (!RANGE_BASE[prefRange]) prefRange = '1d';
+
+function initChart(cw) {
+  if (cw.dataset.init) return;
+  const it = ITEMS[cw.dataset.rk];
+  if (!it) return;
+  cw.dataset.init = '1';
+  const r = it.daily && prefRange === '1d' ? '3m' : prefRange;
+  cw.dataset.r = r;
+  const avail = RANGE_LIST.filter((x) => !(it.daily && x[0] === '1d'));
+  cw.innerHTML = '<div class="chips" role="group" aria-label="차트 기간">' +
+    avail.map((x) => '<button type="button" class="chip" data-r="' + x[0] + '" aria-pressed="' + (x[0] === r) + '">' + x[1] + '</button>').join('') +
+    '</div><div class="sum" aria-live="polite"></div><div class="plot" tabindex="0"></div>' +
+    '<button type="button" class="lnk" aria-expanded="false">표로 보기</button><div class="tbl" hidden></div>';
+  cw.querySelector('.chips').addEventListener('click', (e) => {
+    const b = e.target.closest('.chip');
+    if (!b || b.dataset.r === cw.dataset.r) return;
+    prefRange = b.dataset.r;
+    store.set('sise.range', prefRange);
+    cw.dataset.r = b.dataset.r;
+    cw.querySelectorAll('.chip').forEach((c) => c.setAttribute('aria-pressed', String(c === b)));
+    loadChart(cw);
+  });
+  const plot = cw.querySelector('.plot');
+  const move = (e) => scrubAt(cw, e.clientX);
+  plot.addEventListener('pointerdown', move);
+  plot.addEventListener('pointermove', move);
+  plot.addEventListener('pointerleave', () => unscrub(cw));
+  plot.addEventListener('pointercancel', () => unscrub(cw));
+  plot.addEventListener('blur', () => unscrub(cw));
+  plot.addEventListener('keydown', (e) => {
+    const g = cw._g;
+    if (!g) return;
+    let i = cw._ci == null ? g.n - 1 : cw._ci;
+    if (e.key === 'ArrowLeft') i = Math.max(0, i - 1);
+    else if (e.key === 'ArrowRight') i = Math.min(g.n - 1, i + 1);
+    else if (e.key === 'Home') i = 0;
+    else if (e.key === 'End') i = g.n - 1;
+    else if (e.key === 'Escape') { unscrub(cw); return; }
+    else return;
+    e.preventDefault();
+    setCursor(cw, i);
+  });
+  const lnk = cw.querySelector('.lnk');
+  lnk.addEventListener('click', () => {
+    const tb = cw.querySelector('.tbl');
+    tb.hidden = !tb.hidden;
+    lnk.textContent = tb.hidden ? '표로 보기' : '표 닫기';
+    lnk.setAttribute('aria-expanded', String(!tb.hidden));
+    fillTable(cw);
+  });
+  loadChart(cw);
+}
+
+async function loadChart(cw) {
+  const r = cw.dataset.r;
+  const key = cw.dataset.ck + '|' + r;
+  const c = charts[key];
+  if (c && Date.now() - c.at < (c.err ? 15e3 : RANGE_TTL[r])) {
+    if (cw._drawn !== key + '@' + c.at) drawChart(cw);
+    return;
+  }
+  if (cw._loading === key) return;
+  cw._loading = key;
+  cw.classList.add('loading');
+  if (!cw._drawn) drawChart(cw);
+  try {
+    const res = await fetch('/api/chart?k=' + encodeURIComponent(cw.dataset.ck) + '&r=' + r, { cache: 'no-store' });
+    const d = await res.json();
+    if (!res.ok || d.error) throw new Error(d.error || 'HTTP ' + res.status);
+    charts[key] = { at: Date.now(), pts: d.points, base: d.base, from: d.from };
+  } catch (e) {
+    charts[key] = { at: Date.now(), err: String(e.message || e) };
+  }
+  cw._loading = null;
+  cw.classList.remove('loading');
+  if (cw.dataset.r === r) drawChart(cw);
+}
+
+function niceTicks(lo, hi, count) {
+  const raw = (hi - lo) / count;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const n = raw / mag;
+  const step = (n < 1.5 ? 1 : n < 3 ? 2 : n < 7 ? 5 : 10) * mag;
+  const ticks = [];
+  for (let t = Math.ceil(lo / step) * step; t <= hi + step * 1e-9; t += step) ticks.push(+t.toFixed(10));
+  return { ticks, step };
+}
+function axisText(it, t, step) {
+  if (it.kind === 'spread') return bp(t) + 'bp';
+  const d = Math.max(0, Math.min(4, -Math.floor(Math.log10(step) + 1e-9)));
+  if (it.kind === 'yield') return t.toFixed(d) + '%';
+  const unit = Math.abs(t) >= 1e8 ? [1e8, '억'] : Math.abs(t) >= 1e5 ? [1e4, '만'] : null;
+  if (unit) return fmt(t / unit[0], Math.max(0, Math.min(2, -Math.floor(Math.log10(step / unit[0]) + 1e-9)))) + unit[1];
+  return fmt(t, d);
+}
+function tlabel(t, r, long, daily) {
+  const d = new Date(t);
+  const md = (d.getMonth() + 1) + '/' + d.getDate();
+  const hm = pad(d.getHours()) + ':' + pad(d.getMinutes());
+  if (!daily && r === '1d') return long ? md + ' ' + hm : hm;
+  if (!daily && (r === '1w' || r === '1m')) return long ? md + ' ' + hm : md;
+  const ymd = d.getFullYear() + '.' + (d.getMonth() + 1) + '.' + d.getDate();
+  if (r === '1y' || r === '5y') return long ? ymd : String(d.getFullYear()).slice(2) + '.' + pad(d.getMonth() + 1);
+  return long ? ymd : md;
+}
+
+function drawChart(cw) {
+  const it = ITEMS[cw.dataset.rk] || (cw._g && cw._g.it);
+  const r = cw.dataset.r;
+  const key = cw.dataset.ck + '|' + r;
+  const c = charts[key];
+  const plot = cw.querySelector('.plot');
+  const sum = cw.querySelector('.sum');
+  if (!plot || !it) return;
+  if (!c) {
+    if (!cw._drawn) plot.innerHTML = '<div class="pmsg">차트를 불러오는 중…</div>';
+    return;
+  }
+  cw._drawn = key + '@' + c.at;
+  if (c.err || !c.pts || c.pts.length < 2) {
+    plot.innerHTML = '<div class="pmsg">' + esc('이 기간 차트를 받지 못했습니다' + (c.err ? ' (' + c.err + ')' : '')) + '</div>';
+    sum.textContent = '';
+    cw._g = null;
+    fillTable(cw);
+    return;
+  }
+  const pts = c.pts;
+  const n = pts.length;
+  const base = c.base != null ? c.base : (r === '1d' && it.prev != null ? it.prev : pts[0][1]);
+  const W = Math.max(240, Math.round(plot.clientWidth || 340));
+  const H = 216, padR = 50, padT = 10, padB = 24;
+  const pw = W - padR, ph = H - padT - padB;
+  let lo = Infinity, hi = -Infinity;
+  for (const p of pts) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
+  lo = Math.min(lo, base); hi = Math.max(hi, base);
+  if (hi === lo) { const e = Math.abs(hi) * 0.01 || 1; hi += e; lo -= e; }
+  const pv = (hi - lo) * 0.08; hi += pv; lo -= pv;
+  const x = (i) => (i * pw) / (n - 1);
+  const y = (v) => padT + ((hi - v) / (hi - lo)) * ph;
+  const last = pts[n - 1][1];
+  const dir = last > base ? 'up' : last < base ? 'dn' : 'flat';
+  const label = RANGE_LIST.find((q) => q[0] === r)[1];
+  let s = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + esc(it.name + ' ' + label + ' 차트') + '">';
+  const nt = niceTicks(lo, hi, 4);
+  for (const t of nt.ticks) {
+    const yy = y(t).toFixed(1);
+    s += '<line class="g" x1="0" x2="' + pw + '" y1="' + yy + '" y2="' + yy + '"/>';
+    s += '<text x="' + (W - 2) + '" y="' + (+yy + 4).toFixed(1) + '" text-anchor="end">' + esc(axisText(it, t, nt.step)) + '</text>';
+  }
+  const by = y(base).toFixed(1);
+  s += '<line class="b" x1="0" x2="' + pw + '" y1="' + by + '" y2="' + by + '"/>';
+  let d = '';
+  for (let i = 0; i < n; i++) d += (i ? 'L' : 'M') + x(i).toFixed(1) + ',' + y(pts[i][1]).toFixed(1);
+  s += '<path class="ar ' + dir + '" d="' + d + 'L' + pw + ',' + (padT + ph) + 'L0,' + (padT + ph) + 'Z"/>';
+  s += '<path class="ln ' + dir + '" d="' + d + '"/>';
+  const xs = [0, Math.round((n - 1) / 2), n - 1];
+  const anchors = ['start', 'middle', 'end'];
+  xs.forEach((i, k) => {
+    s += '<text x="' + x(i).toFixed(1) + '" y="' + (H - 6) + '" text-anchor="' + anchors[k] + '">' + esc(tlabel(pts[i][0], r, false, it.daily)) + '</text>';
+  });
+  s += '<line class="xh" x1="0" x2="0" y1="' + padT + '" y2="' + (padT + ph) + '" visibility="hidden"/>';
+  s += '<circle class="dot ' + dir + '" cx="' + x(n - 1).toFixed(1) + '" cy="' + y(last).toFixed(1) + '" r="4"/>';
+  s += '<circle class="dot cur ' + dir + '" cx="0" cy="0" r="4" visibility="hidden"/>';
+  s += '</svg>';
+  plot.innerHTML = s;
+  cw._g = { pts, base, n, W, pw, x, y, r, it };
+  cw._ci = null;
+  showSummary(cw);
+  fillTable(cw);
+}
+
+function showSummary(cw, i) {
+  const g = cw._g;
+  const sum = cw.querySelector('.sum');
+  if (!g || !sum) return;
+  const idx = i == null ? g.n - 1 : i;
+  const v = g.pts[idx][1];
+  const ch = v - g.base;
+  const d = ch > 0 ? 'up' : ch < 0 ? 'dn' : '';
+  let h = '<b>' + esc(valText(g.it, v)) + '</b><span class="' + d + '">' + esc(chgText(g.it, ch, g.base)) + '</span>';
+  if (i == null) {
+    let lo = Infinity, hi = -Infinity;
+    for (const p of g.pts) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
+    h += '<span>' + RANGE_BASE[g.r] + ' 대비 · 고 ' + esc(valText(g.it, hi)) + ' · 저 ' + esc(valText(g.it, lo)) + '</span>';
+  } else {
+    h += '<span>' + esc(tlabel(g.pts[idx][0], g.r, true, g.it.daily)) + '</span>';
+  }
+  sum.innerHTML = h;
+}
+
+function scrubAt(cw, clientX) {
+  const g = cw._g;
+  const svg = cw.querySelector('.plot svg');
+  if (!g || !svg) return;
+  const rect = svg.getBoundingClientRect();
+  const px = ((clientX - rect.left) * g.W) / rect.width;
+  setCursor(cw, Math.max(0, Math.min(g.n - 1, Math.round((px / g.pw) * (g.n - 1)))));
+}
+function setCursor(cw, i) {
+  const g = cw._g;
+  const svg = cw.querySelector('.plot svg');
+  if (!g || !svg) return;
+  cw._ci = i;
+  const xx = g.x(i).toFixed(1);
+  const xh = svg.querySelector('.xh');
+  const cur = svg.querySelector('.cur');
+  xh.setAttribute('x1', xx); xh.setAttribute('x2', xx); xh.setAttribute('visibility', 'visible');
+  cur.setAttribute('cx', xx); cur.setAttribute('cy', g.y(g.pts[i][1]).toFixed(1)); cur.setAttribute('visibility', 'visible');
+  showSummary(cw, i);
+}
+function unscrub(cw) {
+  const svg = cw.querySelector('.plot svg');
+  if (svg) {
+    svg.querySelector('.xh').setAttribute('visibility', 'hidden');
+    svg.querySelector('.cur').setAttribute('visibility', 'hidden');
+  }
+  if (cw._ci != null) { cw._ci = null; showSummary(cw); }
+}
+
+function fillTable(cw) {
+  const tb = cw.querySelector('.tbl');
+  if (!tb || tb.hidden) return;
+  const g = cw._g;
+  if (!g) { tb.innerHTML = ''; return; }
+  const m = Math.min(12, g.n);
+  const idx = [];
+  for (let k = 0; k < m; k++) idx.push(Math.round((k * (g.n - 1)) / (m - 1)));
+  tb.innerHTML = '<table><thead><tr><th>시점</th><th>값</th><th>' + RANGE_BASE[g.r] + ' 대비</th></tr></thead><tbody>' +
+    idx.reverse().map((i) => '<tr><td>' + esc(tlabel(g.pts[i][0], g.r, true, g.it.daily)) + '</td><td>' + esc(valText(g.it, g.pts[i][1])) +
+      '</td><td>' + esc(chgText(g.it, g.pts[i][1] - g.base, g.base)) + '</td></tr>').join('') + '</tbody></table>';
+}
+
+let rz;
+window.addEventListener('resize', () => {
+  clearTimeout(rz);
+  rz = setTimeout(() => document.querySelectorAll('.det.open .cw[data-init]').forEach((cw) => { if (cw._g) drawChart(cw); }), 150);
+});
 $('#list').addEventListener('click', (e) => {
   const b = e.target.closest('[data-act]');
   if (b) {
@@ -859,7 +1299,7 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').cat
 </html>
 `;
 const SW_JS = `// 시세판 서비스워커: 화면은 오프라인에서도 열리게, 시세는 늘 새로 받되 끊기면 마지막 값을 보여 줌
-const V = 'sise-v1';
+const V = 'sise-v2';
 const SHELL = ['/', '/manifest.webmanifest', '/icon-180.png', '/icon-192.png'];
 
 self.addEventListener('install', (e) => {
