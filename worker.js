@@ -282,6 +282,61 @@ async function yahoo(sym, budget) {
   };
 }
 
+// ── 네이버 증권 (국내 실시간)
+const NAVER_IDX = { '^KS11': 'KOSPI', '^KQ11': 'KOSDAQ', '^KS200': 'KPI200' };
+function naverCode(sym) {
+  if (NAVER_IDX[sym]) return NAVER_IDX[sym];
+  const m = /^(\d{6})\.(KS|KQ)$/.exec(sym);
+  return m ? m[1] : null;
+}
+function naverRow(d) {
+  const v = num(d.closePrice);
+  if (v == null) return null;
+  let ch = num(d.compareToPreviousClosePrice);
+  const cp = d.compareToPreviousPrice || {};
+  const code = String(cp.code || '') + ' ' + String(cp.name || '');
+  if (ch != null) {
+    const a = Math.abs(ch);
+    if (/(^|\s)[45](\s|$)|FALL|LOWER/i.test(code)) ch = -a;
+    else if (/(^|\s)[12](\s|$)|RISE|UPPER/i.test(code)) ch = a;
+    else if (/(^|\s)3(\s|$)|EVEN/i.test(code)) ch = 0;
+  }
+  const t = d.localTradedAt ? Date.parse(d.localTradedAt) : NaN;
+  return {
+    value: v, prev: ch != null ? v - ch : null, hi: num(d.highPrice), lo: num(d.lowPrice),
+    time: Number.isFinite(t) ? t : null, live: String(d.marketStatus || '').toUpperCase() === 'OPEN', from: '네이버 증권',
+  };
+}
+async function naver(syms, budget) {
+  const stocks = [];
+  const idx = [];
+  for (const s of syms) {
+    const c = naverCode(s);
+    if (c) (NAVER_IDX[s] ? idx : stocks).push([s, c]);
+  }
+  const out = {};
+  const take = (pairs, datas) => {
+    (datas || []).forEach((d, i) => {
+      const key = d.itemCode || d.reutersCode || d.symbolCode;
+      const hit = pairs.find((p) => p[1] === key) || (pairs.length === datas.length ? pairs[i] : null);
+      const r = naverRow(d);
+      if (hit && r) out[hit[0]] = r;
+    });
+  };
+  const opt = { ttl: 10, budget, headers: { Referer: 'https://finance.naver.com/' } };
+  const base = 'https://polling.finance.naver.com/api/realtime/domestic/';
+  const jobs = [];
+  for (let i = 0; i < stocks.length; i += 20) {
+    const part = stocks.slice(i, i + 20);
+    jobs.push(fetchRaw(base + 'stock/' + part.map((p) => p[1]).join(','), opt).then((j) => take(part, j && j.datas)));
+  }
+  for (const p of idx) jobs.push(fetchRaw(base + 'index/' + p[1], opt).then((j) => take([p], j && j.datas)));
+  const res = await Promise.allSettled(jobs);
+  const bad = res.find((r) => r.status === 'rejected');
+  if (bad && !Object.keys(out).length) throw bad.reason;
+  return out;
+}
+
 // ── CNBC (국채금리)
 async function cnbc(list, budget) {
   const url = 'https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol?symbols=' +
@@ -502,6 +557,19 @@ async function buildChart(it, r, env) {
     try { d = await cnbcHist(it.sym, r, budget); }
     catch (e) { if (it.alt) d = await yahooHist(it.alt, r, budget); else throw e; }
   } else throw new Error('차트를 지원하지 않는 항목');
+  // 국내 1일 차트: 야후(20분 지연) 뒤에 네이버 현재가를 이어 붙임
+  if (r === '1d' && it.src === 'y' && naverCode(it.sym) && d.points.length) {
+    try {
+      const n = (await naver([it.sym], budget))[it.sym];
+      const lastT = d.points[d.points.length - 1][0];
+      const day = (t) => new Date(t + 9 * 3600e3).toISOString().slice(0, 10);
+      if (n && n.time && n.time > lastT && day(n.time) === day(lastT)) {
+        d.points.push([n.time, n.value]);
+        if (n.prev != null) d.base = n.prev;
+        d.from = '야후 파이낸스 + 네이버 증권(현재가)';
+      }
+    } catch (e) { /* 네이버 실패 시 야후 차트만 */ }
+  }
   const mult = it.mult || 1;
   const pts = thinPairs(d.points, 320).map((p) => [p[0], p[1] * mult]);
   if (pts.length < 2) throw new Error('이 기간 데이터가 부족합니다');
@@ -670,10 +738,16 @@ async function fetchItems(items, env, budget, errors) {
   const tasks = [];
 
   const ys = uniq(bySrc('y'));
+  // 국내 지수·주식은 네이버 실시간 시세를 함께 받아 덮어씀 (야후는 20분 지연)
+  const krs = ys.filter(naverCode);
+  const naverP = krs.length ? naver(krs, budget).catch((e) => { errors.push('네이버: ' + e.message); return {}; }) : Promise.resolve({});
+  let yahooFailed = [];
+  let yahooWhy = '';
   if (ys.length) tasks.push(pool(ys, 6, (s) => yahoo(s, budget)).then((res) => {
-    let fails = 0;
-    ys.forEach((s, k) => { if (res[k] && !res[k].error) got['y:' + s] = res[k]; else fails++; });
-    if (fails) errors.push('야후 ' + fails + '건 실패' + (res.find((r) => r && r.error) ? ' (' + res.find((r) => r && r.error).error + ')' : ''));
+    ys.forEach((s, k) => {
+      if (res[k] && !res[k].error) got['y:' + s] = res[k];
+      else { yahooFailed.push(s); if (!yahooWhy && res[k]) yahooWhy = res[k].error; }
+    });
   }));
 
   const cs = uniq(bySrc('c'));
@@ -703,6 +777,19 @@ async function fetchItems(items, env, budget, errors) {
   }).catch((e) => errors.push('업비트: ' + e.message)));
 
   await Promise.all(tasks);
+
+  const nv = await naverP;
+  for (const s of krs) {
+    const n = nv[s];
+    if (!n) continue;
+    const y = got['y:' + s];
+    got['y:' + s] = y
+      ? { ...y, value: n.value, prev: n.prev != null ? n.prev : y.prev, hi: n.hi != null ? n.hi : y.hi, lo: n.lo != null ? n.lo : y.lo,
+          time: n.time || y.time, live: n.live, from: '네이버 증권 (차트: 야후)' }
+      : { ...n, cur: 'KRW', itype: NAVER_IDX[s] ? 'INDEX' : 'EQUITY', spark: [] };
+  }
+  yahooFailed = yahooFailed.filter((s) => !got['y:' + s]);
+  if (yahooFailed.length) errors.push('야후 ' + yahooFailed.length + '건 실패' + (yahooWhy ? ' (' + yahooWhy + ')' : ''));
 
   // CNBC가 막히면 미국 국채는 야후 지표로 대체
   const alts = items.filter((i) => i.alt && !got[keyOf(i)]);
@@ -1216,7 +1303,7 @@ function render() {
     for (const it of s.items) h += row(it);
     h += '</section>';
   }
-  h += '<div class="foot">장중 시세는 야후 파이낸스·CNBC·업비트, 일별 금리는 한국은행 ECOS·FRED 자료입니다. 거래소에 따라 15~20분 지연될 수 있습니다. 행을 누르면 자세한 정보가 열립니다.';
+  h += '<div class="foot">국내 시세는 네이버 증권(실시간), 해외는 야후 파이낸스·CNBC, 코인은 업비트, 일별 금리는 한국은행 ECOS·FRED 자료입니다. 해외 거래소는 15~20분 지연될 수 있고, 미니 차트는 야후 자료라 국내도 20분 늦게 그려집니다. 행을 누르면 자세한 정보가 열립니다.';
   if (d.errors && d.errors.length) h += '<div class="err">일부 항목을 못 가져왔습니다: ' + esc(d.errors.join(' / ')) + '</div>';
   h += '</div>';
   $('#list').innerHTML = h;
