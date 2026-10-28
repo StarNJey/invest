@@ -1093,7 +1093,8 @@ nav::-webkit-scrollbar{display:none}
 .tab{flex:0 0 auto;border:0;background:none;padding:12px 10px 11px;font-size:17px;font-weight:600;color:var(--mute);cursor:pointer;
   border-bottom:3px solid transparent;margin-bottom:-1px;white-space:nowrap}
 .tab[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--ink);font-weight:800}
-main{padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right)}
+main{padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right);overflow-x:clip}
+#list{will-change:auto}
 section h2{position:sticky;top:var(--hdr,96px);z-index:2;margin:0;padding:14px 16px 6px;font-size:13px;font-weight:700;color:var(--mute);
   background:var(--bg);letter-spacing:.01em}
 .row{display:grid;grid-template-columns:minmax(0,1fr) 60px auto;align-items:center;gap:12px;padding:13px 16px;border-bottom:1px solid var(--line);cursor:pointer}
@@ -1859,6 +1860,81 @@ $('#list').addEventListener('submit', (e) => {
   load('watch');
 });
 
+// ───────── 좌우로 밀어서 탭 이동 ─────────
+(function swipeTabs() {
+  const list = $('#list');
+  const reduce = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let sx = 0, sy = 0, dx = 0, lock = null, active = false, busyAnim = false, blockClick = 0;
+  let samples = []; // 최근 손가락 위치 [시각, x] — 마지막 순간의 속도로 '튕기기' 판단
+  const idx = () => TABS.findIndex((t) => t.id === cur);
+  const setX = (x, ms) => {
+    list.style.transition = ms ? 'transform ' + ms + 'ms cubic-bezier(.2,.7,.3,1)' : 'none';
+    list.style.transform = x ? 'translate3d(' + x.toFixed(1) + 'px,0,0)' : '';
+  };
+  // 목록이 짧은 탭(빈 관심 목록 등)에서도 되도록 화면 전체에서 받되, 위쪽 머리(탭 줄)는 제외
+  const zone = document;
+  zone.addEventListener('touchstart', (e) => {
+    active = false;
+    if (busyAnim || e.touches.length !== 1) return;
+    const t = e.touches[0];
+    if (t.clientX < 16 || t.clientX > window.innerWidth - 16) return; // 화면 가장자리는 시스템 제스처용
+    if (e.target.closest('#top, .plot, input, textarea, select')) return;  // 탭 줄·차트 문지르기·입력칸은 제외
+    active = true; lock = null; dx = 0;
+    sx = t.clientX; sy = t.clientY;
+    samples = [[performance.now(), t.clientX]];
+  }, { passive: true });
+  zone.addEventListener('touchmove', (e) => {
+    if (!active) return;
+    const t = e.touches[0];
+    const mx = t.clientX - sx, my = t.clientY - sy;
+    const now = performance.now();
+    samples.push([now, t.clientX]);
+    while (samples.length > 2 && now - samples[0][0] > 120) samples.shift();
+    if (!lock) {
+      if (Math.abs(mx) < 10 && Math.abs(my) < 10) return;
+      lock = Math.abs(mx) > Math.abs(my) * 1.3 ? 'x' : 'y';
+    }
+    if (lock !== 'x') return;
+    e.preventDefault();
+    const i = idx();
+    const edge = (mx > 0 && i <= 0) || (mx < 0 && i >= TABS.length - 1);
+    dx = edge ? mx / 3 : mx;
+    if (!reduce) setX(dx);
+  }, { passive: false });
+  const end = () => {
+    if (!active) return;
+    active = false;
+    if (lock !== 'x') return;
+    blockClick = Date.now();
+    const i = idx();
+    const left = dx < 0;
+    const ni = left ? i + 1 : i - 1;
+    const a = samples[0], z = samples[samples.length - 1];
+    const v = (z[1] - a[1]) / Math.max(16, z[0] - a[0]); // px/ms, 최근 0.12초
+    const flick = Math.abs(v) > 0.3 && Math.sign(v) === Math.sign(dx);
+    const go = Math.abs(dx) > window.innerWidth * 0.22 || (Math.abs(dx) > 40 && flick);
+    if (!go || ni < 0 || ni >= TABS.length) { setX(0, reduce ? 0 : 180); return; }
+    if (reduce) { setX(0); select(TABS[ni].id); return; }
+    const w = window.innerWidth;
+    busyAnim = true;
+    setX(left ? -w : w, 150);
+    setTimeout(() => {
+      select(TABS[ni].id);
+      setX(left ? w * 0.3 : -w * 0.3);
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        setX(0, 200);
+        setTimeout(() => { busyAnim = false; list.style.transition = ''; }, 220);
+      }));
+    }, 150);
+  };
+  zone.addEventListener('touchend', end);
+  zone.addEventListener('touchcancel', end);
+  // 밀고 손을 뗀 직후의 탭(행 열기·기사 열기)은 무시
+  list.addEventListener('click', (e) => {
+    if (Date.now() - blockClick < 400) { e.preventDefault(); e.stopPropagation(); }
+  }, true);
+})();
+
 function measure() { document.documentElement.style.setProperty('--hdr', $('#top').offsetHeight + 'px'); }
 window.addEventListener('resize', measure);
 measure();
@@ -1875,7 +1951,7 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').cat
 </html>
 `;
 const SW_JS = `// 시세판 서비스워커: 화면은 오프라인에서도 열리게, 시세는 늘 새로 받되 끊기면 마지막 값을 보여 줌
-const V = 'sise-v3';
+const V = 'sise-v4';
 const SHELL = ['/', '/manifest.webmanifest', '/icon-180.png', '/icon-192.png'];
 
 self.addEventListener('install', (e) => {
