@@ -6,6 +6,7 @@
  *  /api/quote?s=AAPL,...  관심목록용 야후 심볼 시세(JSON)
  *  /api/chart?k=y:GC=F&r=1m  기간별 차트 (r = 1d 1w 1m 3m 1y 5y)
  *  /api/news              경제 뉴스 (언론사 RSS 모음)
+ *  /api/flow?k=y:005930.KS  투자자별 순매수 (국내 주식·코스피·코스닥)
  *
  * 데이터 출처 (모두 무료, 일부 지연 시세)
  *  - 야후 파이낸스: 지수·주식·원자재 선물·환율·코인(달러)
@@ -335,6 +336,63 @@ async function naver(syms, budget) {
   const bad = res.find((r) => r.status === 'rejected');
   if (bad && !Object.keys(out).length) throw bad.reason;
   return out;
+}
+
+// ── 투자자별 순매수 (개인·외국인·기관)
+const FLOW_MKT = { '^KS11': ['01', '코스피 시장 전체'], '^KS200': ['01', '코스피 시장 전체'], '^KQ11': ['02', '코스닥 시장 전체'] };
+function parseDealTrend(html) {
+  const rows = [];
+  for (const tr of html.match(/<tr[\s\S]*?<\/tr>/gi) || []) {
+    const cells = (tr.match(/<td[\s\S]*?<\/td>/gi) || []).map((td) => td.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim());
+    if (cells.length < 4) continue;
+    const m = /^(\d{2})\.(\d{2})\.(\d{2})$/.exec(cells[0]);
+    if (!m) continue;
+    const ind = num(cells[1]), frg = num(cells[2]), org = num(cells[3]);
+    if (ind == null || frg == null || org == null) continue;
+    rows.push({ d: '20' + m[1] + '-' + m[2] + '-' + m[3], ind, frg, org });
+  }
+  return rows;
+}
+function pickFlow(o, key, re) {
+  if (o[key] != null) { const v = num(o[key]); if (v != null) return v; }
+  for (const k of Object.keys(o)) {
+    if (re.test(k) && /Pure|Net|Buy/i.test(k) && !/Ratio|Hold|Rate/i.test(k)) { const v = num(o[k]); if (v != null) return v; }
+  }
+  return null;
+}
+async function buildFlow(sym, code) {
+  const budget = { used: 0 };
+  const mk = FLOW_MKT[sym];
+  if (mk) {
+    const today = new Date(Date.now() + 9 * 3600e3).toISOString().slice(0, 10).replace(/-/g, '');
+    const buf = await fetchRaw('https://finance.naver.com/sise/investorDealTrendDay.naver?bizdate=' + today + '&sosok=' + mk[0] + '&page=1',
+      { ttl: 120, type: 'buf', budget, headers: { Referer: 'https://finance.naver.com/sise/' } });
+    const rows = parseDealTrend(new TextDecoder('utf-8').decode(buf)); // 숫자·날짜만 쓰므로 EUC-KR 한글은 무시
+    if (!rows.length) throw new Error('매매동향 표를 찾지 못함');
+    return { k: 'y:' + sym, scope: mk[1], est: false, rows: rows.slice(0, 10), hold: null, from: '네이버 증권 투자자별 매매동향' };
+  }
+  const j = await fetchRaw('https://m.stock.naver.com/api/stock/' + code + '/trend?pageSize=10',
+    { ttl: 120, budget, headers: { Referer: 'https://m.stock.naver.com/' } });
+  const arr = Array.isArray(j) ? j : (j && (j.result || j.datas || j.list)) || [];
+  const rows = [];
+  let hold = null;
+  for (const o of arr) {
+    const b = String(o.bizdate || o.localTradedAt || '').replace(/-/g, '').slice(0, 8);
+    if (!/^\d{8}$/.test(b)) continue;
+    const q = {
+      ind: pickFlow(o, 'individualPureBuyQuant', /individual|personal/i),
+      frg: pickFlow(o, 'foreignerPureBuyQuant', /foreign/i),
+      org: pickFlow(o, 'organPureBuyQuant', /organ|institution/i),
+    };
+    if (q.ind == null && q.frg == null && q.org == null) continue;
+    const close = num(o.closePrice);
+    const amt = (x) => (x == null || close == null ? null : (x * close) / 1e8);
+    rows.push({ d: b.slice(0, 4) + '-' + b.slice(4, 6) + '-' + b.slice(6, 8), ind: amt(q.ind), frg: amt(q.frg), org: amt(q.org), q });
+    if (hold == null && o.foreignerHoldRatio != null && num(o.foreignerHoldRatio) != null) hold = num(o.foreignerHoldRatio);
+  }
+  if (!rows.length) throw new Error('수급 자료 없음');
+  rows.sort((a, b) => b.d.localeCompare(a.d));
+  return { k: 'y:' + sym, scope: null, est: true, rows: rows.slice(0, 10), hold, from: '네이버 증권' };
 }
 
 // ── CNBC (국채금리)
@@ -809,7 +867,7 @@ function shape(it, q, av) {
   const out = {
     name: it.name, sym: it.sym, src: it.src, tick: tickOf(it), kind: it.kind, unit: it.unit || null,
     dec: it.dec != null ? it.dec : null, ysym: it.src === 'y' ? it.sym : null,
-    chart: it.src !== 'calc', daily: it.src === 'f' || it.src === 'e',
+    chart: it.src !== 'calc', daily: it.src === 'f' || it.src === 'e', flow: it.src === 'y' && !!naverCode(it.sym),
     av: !!av, logo: av && it.dom ? 'https://www.google.com/s2/favicons?domain=' + encodeURIComponent(it.dom) + '&sz=64' : null,
   };
   if (!q || q.value == null) return { ...out, value: null };
@@ -946,6 +1004,19 @@ export default {
         if (!data) {
           try { data = await buildChart(it, r, env); } catch (e) { return json({ error: String((e && e.message) || e) }, 502); }
           memSet(ck, data, RANGES[r].ttl);
+        }
+        return json(data);
+      }
+      if (p === '/api/flow') {
+        const m = /^y:(.+)$/.exec(url.searchParams.get('k') || '');
+        const sym = m ? m[1] : '';
+        const code = naverCode(sym);
+        if (!code) return json({ error: '수급 정보가 없는 종목' }, 404);
+        const ck = 'flow:' + sym;
+        let data = memGet(ck);
+        if (!data) {
+          try { data = await buildFlow(sym, code); } catch (e) { return json({ error: String((e && e.message) || e) }, 502); }
+          memSet(ck, data, 120);
         }
         return json(data);
       }
@@ -1087,6 +1158,24 @@ section h2{position:sticky;top:var(--hdr,96px);z-index:2;margin:0;padding:14px 1
 .tbl th,.tbl td{padding:4px 0;border-bottom:1px solid var(--line);text-align:right;font-weight:400}
 .tbl th:first-child,.tbl td:first-child{text-align:left}
 .tbl td{color:var(--ink)}
+.fw{margin:2px 0 14px;padding-top:12px;border-top:1px solid var(--line)}
+.fl-h{display:flex;align-items:center;gap:6px}
+.fl-h b{font-size:14px;color:var(--ink)}
+.fl-u{font-size:12px;color:var(--mute)}
+.fl-p{display:flex;gap:2px;margin-left:auto}
+.fl-p .chip{flex:0 0 auto;padding:5px 11px;font-size:13px}
+.fl-sub{margin:6px 0 6px;font-size:12px;color:var(--mute)}
+.fl-row{display:grid;grid-template-columns:44px minmax(0,1fr) 78px;align-items:center;gap:8px;height:30px}
+.fl-k{font-size:13px;color:var(--ink)}
+.fl-tr{position:relative;height:12px}
+.fl-tr::before{content:'';position:absolute;left:50%;top:-5px;bottom:-5px;width:1px;background:var(--faint)}
+.fl-b{position:absolute;top:0;height:12px;background:var(--mute)}
+.fl-b.up{background:var(--up);border-radius:0 3px 3px 0} .fl-b.dn{background:var(--dn);border-radius:3px 0 0 3px}
+.fl-v{text-align:right;font-size:14px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--mute)}
+.fl-v.up{color:var(--up)} .fl-v.dn{color:var(--dn)}
+.fl-note{margin-top:4px;font-size:12px;color:var(--mute);line-height:1.5}
+.fl-msg{padding:10px 0 4px;font-size:13px;color:var(--mute)}
+.tbl td.up{color:var(--up)} .tbl td.dn{color:var(--dn)}
 .nf{display:flex;gap:6px;padding:12px 16px 8px;border-bottom:1px solid var(--line)}
 .nfc{border:0;background:none;border-radius:999px;padding:6px 14px;font-size:14px;font-weight:600;color:var(--mute);cursor:pointer;box-shadow:inset 0 0 0 1px var(--line)}
 .nfc[aria-pressed="true"]{background:var(--ink);color:var(--bg);box-shadow:none}
@@ -1234,6 +1323,7 @@ function row(it) {
     '<div class="r"><div class="px ' + flash + '">' + valueText(it) + '</div><div class="ch ' + d + '">' + esc(changeText(it)) + '</div>' + ex + '</div></div>';
   h += '<div class="det' + (isOpen ? ' open' : '') + '">';
   if (it.chart && it.value != null) h += '<div class="cw" data-rk="' + esc(key) + '" data-ck="' + esc(it.src + ':' + it.sym) + '"></div>';
+  if (it.flow && it.value != null) h += '<div class="fw" data-fk="' + esc('y:' + it.sym) + '"></div>';
   h += '<dl>';
   const add = (k, v) => { if (v != null && v !== '') h += '<dt>' + k + '</dt><dd>' + esc(v) + '</dd>'; };
   if (it.ext) {
@@ -1311,6 +1401,7 @@ function render() {
     const old = keep[ph.dataset.rk];
     if (old) { ph.replaceWith(old); loadChart(old); } else initChart(ph);
   });
+  document.querySelectorAll('.det.open .fw').forEach(initFlow);
   stamp();
 }
 
@@ -1385,6 +1476,102 @@ function toggleRow(el) {
   el.setAttribute('aria-expanded', String(on));
   const cw = det.querySelector('.cw');
   if (on && cw) { if (cw.dataset.init) drawChart(cw); else initChart(cw); }
+  const fw = det.querySelector('.fw');
+  if (on && fw) initFlow(fw);
+}
+
+// ───────── 투자자별 순매수 ─────────
+const FLOW_P = [[1, '당일'], [5, '5일'], [10, '10일']];
+let flowP = store.get('sise.flowp', 1);
+if (!FLOW_P.some((x) => x[0] === flowP)) flowP = 1;
+const flows = {};
+const flowDays = new Set();
+const mdOf = (d) => (+d.slice(5, 7)) + '/' + (+d.slice(8, 10));
+function fmtEok(v) {
+  if (v == null || !isFinite(v)) return '—';
+  const a = Math.abs(v);
+  const s = a >= 10 ? Math.round(a).toLocaleString('en-US') : a.toFixed(1);
+  return (v > 0 ? '+' : v < 0 ? '-' : '') + s;
+}
+const dirV = (v) => (v > 0 ? 'up' : v < 0 ? 'dn' : '');
+
+function initFlow(fw) {
+  if (!fw.dataset.init) {
+    fw.dataset.init = '1';
+    fw.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-fp]');
+      if (b) {
+        flowP = +b.dataset.fp;
+        store.set('sise.flowp', flowP);
+        document.querySelectorAll('.fw[data-init]').forEach(drawFlow);
+        return;
+      }
+      if (e.target.closest('.fl-more')) {
+        const k = fw.dataset.fk;
+        if (flowDays.has(k)) flowDays.delete(k); else flowDays.add(k);
+        drawFlow(fw);
+      }
+    });
+  }
+  drawFlow(fw);
+  const c = flows[fw.dataset.fk];
+  if (!c || Date.now() - c.at > (c.err ? 15e3 : 120e3)) loadFlow(fw.dataset.fk);
+}
+
+async function loadFlow(k) {
+  if (flows[k] && flows[k].loading) return;
+  flows[k] = Object.assign(flows[k] || {}, { loading: true });
+  try {
+    const r = await fetch('/api/flow?k=' + encodeURIComponent(k), { cache: 'no-store' });
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || 'HTTP ' + r.status);
+    flows[k] = { at: Date.now(), d };
+  } catch (e) {
+    flows[k] = { at: Date.now(), err: String(e.message || e), d: flows[k] && flows[k].d };
+  }
+  document.querySelectorAll('.fw[data-init]').forEach((fw) => { if (fw.dataset.fk === k) drawFlow(fw); });
+}
+
+function drawFlow(fw) {
+  const k = fw.dataset.fk;
+  const c = flows[k];
+  let h = '<div class="fl-h"><b>투자자별 순매수</b><span class="fl-u">억원</span><div class="fl-p" role="group" aria-label="합계 기간">' +
+    FLOW_P.map((x) => '<button type="button" class="chip" data-fp="' + x[0] + '" aria-pressed="' + (x[0] === flowP) + '">' + x[1] + '</button>').join('') + '</div></div>';
+  const d = c && c.d;
+  if (!d) {
+    fw.innerHTML = h + '<div class="fl-msg">' + (c && c.err ? esc('수급을 받지 못했습니다 (' + c.err + ')') : '수급을 불러오는 중…') + '</div>';
+    return;
+  }
+  const rows = d.rows.slice(0, flowP);
+  const sum = (key) => {
+    let s = 0, any = false;
+    for (const r of rows) if (r[key] != null) { s += r[key]; any = true; }
+    return any ? s : null;
+  };
+  const vals = [['개인', sum('ind')], ['외국인', sum('frg')], ['기관', sum('org')]];
+  const max = Math.max(1e-9, ...vals.map((v) => Math.abs(v[1] || 0)));
+  const range = rows.length > 1 ? mdOf(rows[rows.length - 1].d) + ' ~ ' + mdOf(rows[0].d) : mdOf(rows[0].d);
+  h += '<div class="fl-sub">' + esc(range) + (d.scope ? ' · ' + esc(d.scope) : '') +
+    (rows.length < flowP ? ' · ' + rows.length + '거래일치만 있음' : '') + '</div>';
+  for (const [label, v] of vals) {
+    const w = v == null || v === 0 ? 0 : Math.max(0.8, (Math.abs(v) / max) * 50);
+    const left = v < 0 ? 50 - w : 50;
+    h += '<div class="fl-row"><span class="fl-k">' + label + '</span><span class="fl-tr" aria-hidden="true"><i class="fl-b ' + dirV(v) +
+      '" style="left:' + left.toFixed(2) + '%;width:' + w.toFixed(2) + '%"></i></span><span class="fl-v ' + dirV(v) + '">' + fmtEok(v) + '</span></div>';
+  }
+  const notes = [];
+  if (d.hold != null) notes.push('외국인 보유 비율 ' + Number(d.hold).toFixed(2) + '%');
+  if (d.est) notes.push('종목 수급은 순매수 주식 수 × 그날 종가로 환산한 추정치입니다.');
+  if (c.err) notes.push('최신 자료를 받지 못해 이전 값을 보여 줍니다.');
+  if (notes.length) h += '<div class="fl-note">' + notes.map(esc).join('<br>') + '</div>';
+  const open = flowDays.has(k);
+  h += '<button type="button" class="lnk fl-more" aria-expanded="' + open + '">' + (open ? '일별 닫기' : '일별 보기') + '</button>';
+  if (open) {
+    h += '<div class="tbl"><table><thead><tr><th>날짜</th><th>개인</th><th>외국인</th><th>기관</th></tr></thead><tbody>' +
+      d.rows.map((r) => '<tr><td>' + esc(mdOf(r.d)) + '</td>' + ['ind', 'frg', 'org'].map((x) => '<td class="' + dirV(r[x]) + '">' + fmtEok(r[x]) + '</td>').join('') + '</tr>').join('') +
+      '</tbody></table></div>';
+  }
+  fw.innerHTML = h;
 }
 
 // ───────── 기간별 차트 ─────────
